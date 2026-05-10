@@ -918,7 +918,7 @@ function safeToast(
     .catch(() => {})
 }
 
-export const internals = {
+const internals = {
   QueueManager,
   IdleDetector,
   FileLock,
@@ -928,4 +928,6 @@ export const internals = {
 }
 
 export type { QueueConfig, QueueItem, QueueStore, BlockedReason }
-export default OpencodeQueuePlugin
+export default Object.assign(OpencodeQueuePlugin, {
+  __internals: internals,
+})

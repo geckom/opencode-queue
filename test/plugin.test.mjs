@@ -109,8 +109,8 @@ test("processor completes a pending item and stores the result", async () => {
   mkdirSync(workspace, { recursive: true })
 
   try {
-    const { internals } = await loadPluginModule(configHome)
-    const { QueueManager, QueueProcessor, IdleDetector } = internals
+    const { default: OpencodeQueuePlugin } = await loadPluginModule(configHome)
+    const { QueueManager, QueueProcessor, IdleDetector } = OpencodeQueuePlugin.__internals
 
     const queueManager = new QueueManager()
     const created = queueManager.addItem(workspace, "Run the queued task")
@@ -138,8 +138,8 @@ test("processor treats a missing session.status entry as completed", async () =>
   mkdirSync(workspace, { recursive: true })
 
   try {
-    const { internals } = await loadPluginModule(configHome)
-    const { QueueManager, QueueProcessor, IdleDetector } = internals
+    const { default: OpencodeQueuePlugin } = await loadPluginModule(configHome)
+    const { QueueManager, QueueProcessor, IdleDetector } = OpencodeQueuePlugin.__internals
 
     const queueManager = new QueueManager()
     const created = queueManager.addItem(workspace, "Run the queued task")
@@ -168,8 +168,8 @@ test("processor does not complete early on a missing status before assistant out
   mkdirSync(workspace, { recursive: true })
 
   try {
-    const { internals } = await loadPluginModule(configHome)
-    const { QueueManager, QueueProcessor, IdleDetector } = internals
+    const { default: OpencodeQueuePlugin } = await loadPluginModule(configHome)
+    const { QueueManager, QueueProcessor, IdleDetector } = OpencodeQueuePlugin.__internals
 
     const queueManager = new QueueManager()
     const created = queueManager.addItem(workspace, "Run the queued task")
@@ -224,8 +224,8 @@ test("permission events move running items into blocked state", async () => {
   mkdirSync(workspace, { recursive: true })
 
   try {
-    const { internals } = await loadPluginModule(configHome)
-    const { QueueManager, BlockWatcher } = internals
+    const { default: OpencodeQueuePlugin } = await loadPluginModule(configHome)
+    const { QueueManager, BlockWatcher } = OpencodeQueuePlugin.__internals
     const queueManager = new QueueManager()
     const created = queueManager.addItem(workspace, "Needs permission")
     assert.ok("id" in created)

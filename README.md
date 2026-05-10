@@ -15,7 +15,6 @@ This repo is the source of truth for the plugin formerly developed under the wor
 ## Repo Layout
 
 - `src/opencode-queue.ts`: plugin implementation
-- `src/opencode-plugin.ts`: thin published entrypoint
 - `test/plugin.test.mjs`: plugin tests against compiled output
 
 ## Local Development
@@ -35,7 +34,6 @@ npm run build:runtime
 That writes:
 
 - `~/.config/opencode/plugins/opencode-queue.js`
-- `~/.config/opencode/plugin/opencode-queue/index.js`
 
 ## Publish Checklist
 
@@ -73,7 +71,7 @@ The repo is set up to be published publicly:
 - license is MIT
 - CI should run on pushes and pull requests
 - the package tarball is limited to `dist/`, `README.md`, and `LICENSE`
-- `npm run build:runtime` deploys the live OpenCode runtime under `opencode-queue` paths and removes the legacy `executive-assistant` runtime
+- `npm run build:runtime` deploys a single live OpenCode plugin file at `~/.config/opencode/plugins/opencode-queue.js` and removes the legacy `executive-assistant` runtime
 
 One manual step remains before first public release: replace placeholder GitHub URLs in `package.json` after you create the real repository.
 
