@@ -1,0 +1,931 @@
+import type { OpencodeClient } from "@opencode-ai/sdk"
+import { tool, type Plugin } from "@opencode-ai/plugin"
+import { randomUUID } from "crypto"
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, statSync } from "fs"
+import { join, resolve } from "path"
+
+const CONFIG_DIR = process.env.XDG_CONFIG_HOME || join(process.env.HOME!, ".config")
+const OPENCODE_DIR = join(CONFIG_DIR, "opencode")
+const QUEUE_FILE = join(OPENCODE_DIR, "queue.json")
+const LAST_ACTIVITY_FILE = join(OPENCODE_DIR, "queue.last-activity")
+const LOCK_FILE = join(OPENCODE_DIR, "queue.lock")
+
+interface QueueConfig {
+  idleTimeoutSeconds: number
+  blockedReminderMinutes: number
+  maxRetries: number
+  retryDelaysMinutes: number[]
+  reminderIntervalMessages: number
+}
+
+interface BlockedReason {
+  type: "permission" | "question"
+  permissionId: string | null
+  requestId?: string | null
+  details: string
+  options: string[] | null
+  userResponse: string | null
+}
+
+interface QueueItem {
+  id: string
+  workspace: string
+  goal: string
+  status: "pending" | "running" | "blocked" | "completed" | "failed"
+  sessionId: string | null
+  createdAt: string
+  startedAt: string | null
+  completedAt: string | null
+  blockedReason: BlockedReason | null
+  error: string | null
+  result: string | null
+  sessionUrl: string | null
+  retryCount: number
+  nextRetryAt: string | null
+}
+
+interface QueueStore {
+  config: QueueConfig
+  items: QueueItem[]
+}
+
+const DEFAULT_CONFIG: QueueConfig = {
+  idleTimeoutSeconds: 3600,
+  blockedReminderMinutes: 30,
+  maxRetries: 3,
+  retryDelaysMinutes: [5, 10, 15],
+  reminderIntervalMessages: 30,
+}
+
+class QueueManager {
+  private readStore(): QueueStore {
+    try {
+      if (!existsSync(QUEUE_FILE)) {
+        return { config: { ...DEFAULT_CONFIG }, items: [] }
+      }
+      const raw = readFileSync(QUEUE_FILE, "utf-8")
+      return JSON.parse(raw) as QueueStore
+    } catch {
+      return { config: { ...DEFAULT_CONFIG }, items: [] }
+    }
+  }
+
+  private writeStore(store: QueueStore): void {
+    if (!existsSync(OPENCODE_DIR)) {
+      mkdirSync(OPENCODE_DIR, { recursive: true })
+    }
+    const tmp = QUEUE_FILE + ".tmp"
+    writeFileSync(tmp, JSON.stringify(store, null, 2), "utf-8")
+    renameSync(tmp, QUEUE_FILE)
+  }
+
+  getConfig(): QueueConfig {
+    return this.readStore().config
+  }
+
+  listItems(status?: string): QueueItem[] {
+    const store = this.readStore()
+    if (status) {
+      return store.items.filter((item) => item.status === status)
+    }
+    return store.items
+  }
+
+  getItem(id: string): QueueItem | undefined {
+    return this.readStore().items.find((item) => item.id === id)
+  }
+
+  addItem(workspace: string, goal: string): QueueItem | { error: string } {
+    const absWorkspace = resolve(workspace)
+    if (!existsSync(absWorkspace)) {
+      return { error: `Directory not found: ${absWorkspace}` }
+    }
+    const store = this.readStore()
+    const item: QueueItem = {
+      id: randomUUID(),
+      workspace: absWorkspace,
+      goal,
+      status: "pending",
+      sessionId: null,
+      createdAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+      blockedReason: null,
+      error: null,
+      result: null,
+      sessionUrl: null,
+      retryCount: 0,
+      nextRetryAt: null,
+    }
+    store.items.push(item)
+    this.writeStore(store)
+    return item
+  }
+
+  updateItem(id: string, updates: Partial<QueueItem>): QueueItem | undefined {
+    const store = this.readStore()
+    const idx = store.items.findIndex((item) => item.id === id)
+    if (idx === -1) return undefined
+    Object.assign(store.items[idx], updates)
+    this.writeStore(store)
+    return store.items[idx]
+  }
+
+  removeItem(id: string): boolean {
+    const store = this.readStore()
+    const idx = store.items.findIndex((item) => item.id === id)
+    if (idx === -1) return false
+    store.items.splice(idx, 1)
+    this.writeStore(store)
+    return true
+  }
+
+  getNextPending(): QueueItem | undefined {
+    const store = this.readStore()
+    const now = Date.now()
+    return store.items.find((item) => {
+      if (item.status === "pending") return true
+      if (item.status === "running" && item.nextRetryAt) {
+        return new Date(item.nextRetryAt).getTime() <= now
+      }
+      return false
+    })
+  }
+
+  countByStatus(): Record<string, number> {
+    const store = this.readStore()
+    const counts: Record<string, number> = {}
+    for (const item of store.items) {
+      counts[item.status] = (counts[item.status] || 0) + 1
+    }
+    return counts
+  }
+
+  resetRunningToPending(): void {
+    const store = this.readStore()
+    let changed = false
+    for (const item of store.items) {
+      if (item.status === "running") {
+        item.status = "pending"
+        changed = true
+      }
+    }
+    if (changed) this.writeStore(store)
+  }
+}
+
+class IdleDetector {
+  private timer: ReturnType<typeof setInterval> | null = null
+  private config: QueueConfig
+  private onIdle: () => Promise<void>
+
+  constructor(config: QueueConfig, onIdle: () => Promise<void>) {
+    this.config = config
+    this.onIdle = onIdle
+  }
+
+  start(): void {
+    this.writeActivity()
+    this.timer = setInterval(() => this.checkIdle(), 30_000)
+    this.timer.unref?.()
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer)
+      this.timer = null
+    }
+  }
+
+  writeActivity(): void {
+    try {
+      if (!existsSync(OPENCODE_DIR)) {
+        mkdirSync(OPENCODE_DIR, { recursive: true })
+      }
+      writeFileSync(LAST_ACTIVITY_FILE, Date.now().toString(), "utf-8")
+    } catch {}
+  }
+
+  private async checkIdle(): Promise<void> {
+    try {
+      if (!existsSync(LAST_ACTIVITY_FILE)) {
+        await this.onIdle()
+        return
+      }
+      const lastActivity = parseInt(readFileSync(LAST_ACTIVITY_FILE, "utf-8").trim(), 10)
+      const elapsed = Date.now() - lastActivity
+      if (elapsed >= this.config.idleTimeoutSeconds * 1000) {
+        await this.onIdle()
+      }
+    } catch {}
+  }
+}
+
+class FileLock {
+  static async acquire(): Promise<boolean> {
+    try {
+      if (!existsSync(OPENCODE_DIR)) {
+        mkdirSync(OPENCODE_DIR, { recursive: true })
+      }
+      if (existsSync(LOCK_FILE)) {
+        const stat = statSync(LOCK_FILE)
+        if (Date.now() - stat.mtimeMs > 30 * 60 * 1000) {
+          unlinkSync(LOCK_FILE)
+        } else {
+          return false
+        }
+      }
+      writeFileSync(LOCK_FILE, `${process.pid}\n${Date.now()}`, "utf-8")
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  static release(): void {
+    try {
+      if (existsSync(LOCK_FILE)) {
+        unlinkSync(LOCK_FILE)
+      }
+    } catch {}
+  }
+}
+
+class BlockWatcher {
+  private queueManager: QueueManager
+  private client: OpencodeClient
+
+  constructor(queueManager: QueueManager, client: OpencodeClient) {
+    this.queueManager = queueManager
+    this.client = client
+  }
+
+  handleEvent(event: { type: string; properties?: Record<string, unknown> }): void {
+    if (event.type === "permission.asked") {
+      const permission = event.properties as
+        | {
+            id?: string
+            sessionID?: string
+            permission?: string
+            patterns?: string[]
+          }
+        | undefined
+
+      if (!permission?.sessionID) return
+      const item = this.queueManager
+        .listItems("running")
+        .find((candidate) => candidate.sessionId === permission.sessionID)
+      if (!item) return
+
+      const patterns = Array.isArray(permission.patterns) ? permission.patterns : []
+      const details = [permission.permission, patterns.length > 0 ? `Patterns: ${patterns.join(", ")}` : null]
+        .filter(Boolean)
+        .join(" | ")
+
+      this.queueManager.updateItem(item.id, {
+        status: "blocked",
+        blockedReason: {
+          type: "permission",
+          permissionId: typeof permission.id === "string" ? permission.id : null,
+          requestId: typeof permission.id === "string" ? permission.id : null,
+          details: details || "Permission request pending",
+          options: ["once", "always", "reject"],
+          userResponse: null,
+        },
+      })
+      return
+    }
+
+    if (event.type === "question.asked") {
+      const question = event.properties as
+        | {
+            id?: string
+            sessionID?: string
+            questions?: Array<{
+              question?: string
+              options?: Array<{ label?: string }>
+            }>
+          }
+        | undefined
+
+      if (!question?.sessionID) return
+      const item = this.queueManager
+        .listItems("running")
+        .find((candidate) => candidate.sessionId === question.sessionID)
+      if (!item) return
+
+      const questions = Array.isArray(question.questions) ? question.questions : []
+      const details = questions
+        .map((entry) => entry.question)
+        .filter((entry): entry is string => Boolean(entry))
+        .join(" | ")
+      const options = questions.flatMap((entry) =>
+        Array.isArray(entry.options)
+          ? entry.options
+              .map((option) => option.label)
+              .filter((label): label is string => Boolean(label))
+          : [],
+      )
+
+      this.queueManager.updateItem(item.id, {
+        status: "blocked",
+        blockedReason: {
+          type: "question",
+          permissionId: null,
+          requestId: typeof question.id === "string" ? question.id : null,
+          details: details || "Question pending",
+          options: options.length > 0 ? options : null,
+          userResponse: null,
+        },
+      })
+    }
+  }
+
+  async checkForBlocks(item: QueueItem): Promise<boolean> {
+    if (!item.sessionId) return false
+    if (item.status === "blocked") return true
+    const q = { directory: item.workspace }
+
+    try {
+      const { data: messages } = await this.client.session.messages({
+        path: { id: item.sessionId! },
+        query: q,
+      })
+      if (!messages) return false
+
+      for (const msg of messages) {
+        for (const part of msg.parts) {
+          if (
+            part.type === "tool" &&
+            part.tool === "question" &&
+            part.state.status === "pending"
+          ) {
+            const input = part.state.input as Record<string, unknown>
+            this.queueManager.updateItem(item.id, {
+              status: "blocked",
+              blockedReason: {
+                type: "question",
+                permissionId: null,
+                requestId: null,
+                details: String(input.text || input.message || input.question || JSON.stringify(input)),
+                options: Array.isArray(input.options) ? input.options.map(String) : null,
+                userResponse: null,
+              },
+            })
+            return true
+          }
+        }
+      }
+
+      const { data: statusMap } = await this.client.session.status({ query: q })
+      if (statusMap) {
+        for (const [, sessionStatus] of Object.entries(statusMap)) {
+          if (sessionStatus?.type === "idle") {
+            return false
+          }
+        }
+      }
+    } catch {}
+
+    return false
+  }
+
+  async respondToBlock(item: QueueItem, response: string): Promise<boolean> {
+    if (!item.blockedReason || !item.sessionId) return false
+    const q = { directory: item.workspace }
+
+    try {
+      if (item.blockedReason.type === "permission" && item.blockedReason.permissionId) {
+        const normalized = response.toLowerCase()
+        const allowAlways = normalized === "always"
+        const allowOnce = normalized === "yes" || normalized === "allow" || normalized === "once"
+        const reject = normalized === "no" || normalized === "reject"
+        await this.client.postSessionIdPermissionsPermissionId({
+          path: { id: item.sessionId!, permissionID: item.blockedReason.permissionId },
+          body: { response: reject ? "reject" : allowAlways ? "always" : allowOnce ? "once" : "once" },
+          query: q,
+        })
+      } else {
+        await this.client.session.prompt({
+          path: { id: item.sessionId! },
+          query: q,
+          body: {
+            parts: [{ type: "text", text: response }],
+          },
+        })
+      }
+
+      this.queueManager.updateItem(item.id, {
+        status: "pending",
+        blockedReason: {
+          ...item.blockedReason,
+          userResponse: response,
+        },
+      })
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+class QueueProcessor {
+  private isProcessing = false
+  private blockWatcher: BlockWatcher
+  private queueManager: QueueManager
+  private client: OpencodeClient
+  private idleDetector: IdleDetector
+
+  constructor(queueManager: QueueManager, client: OpencodeClient, idleDetector: IdleDetector) {
+    this.queueManager = queueManager
+    this.client = client
+    this.idleDetector = idleDetector
+    this.blockWatcher = new BlockWatcher(queueManager, client)
+  }
+
+  async processNext(): Promise<boolean> {
+    if (this.isProcessing) return false
+    const item = this.queueManager.getNextPending()
+    if (!item) return false
+
+    this.isProcessing = true
+    try {
+      if (!existsSync(item.workspace)) {
+        this.queueManager.updateItem(item.id, {
+          status: "failed",
+          error: `Directory not found: ${item.workspace}`,
+          completedAt: new Date().toISOString(),
+        })
+        this.isProcessing = false
+        return true
+      }
+
+      const q = { directory: item.workspace }
+
+      let sessionId = item.sessionId
+      if (!sessionId) {
+        const { data: session } = await this.client.session.create({
+          query: q,
+          body: { title: item.goal.substring(0, 100) },
+        })
+        if (!session) {
+          this.queueManager.updateItem(item.id, {
+            status: "failed",
+            error: "Failed to create session",
+          })
+          this.isProcessing = false
+          return true
+        }
+        sessionId = session.id
+        this.queueManager.updateItem(item.id, {
+          sessionId: session.id,
+          sessionUrl: `http://localhost:4096/session/${session.id}`,
+          startedAt: new Date().toISOString(),
+          status: "running",
+        })
+      } else {
+        this.queueManager.updateItem(item.id, { status: "running" })
+      }
+
+      await this.client.session.promptAsync({
+        path: { id: sessionId! },
+        query: q,
+        body: {
+          parts: [{ type: "text", text: item.goal }],
+        },
+      })
+
+      await this.waitForCompletion(item.id, sessionId!, q)
+
+      return true
+    } catch (err) {
+      this.handleSessionError(item.id, err)
+      return true
+    } finally {
+      this.isProcessing = false
+    }
+  }
+
+  private async waitForCompletion(itemId: string, sessionId: string, q: { directory: string }): Promise<void> {
+    const maxWaitMs = 30 * 60 * 1000
+    const pollIntervalMs = 5_000
+    const startTime = Date.now()
+
+    while (Date.now() - startTime < maxWaitMs) {
+      const blocked = await this.blockWatcher.checkForBlocks(
+        this.queueManager.getItem(itemId)!,
+      )
+      if (blocked) return
+
+      const { data: statusMap } = await this.client.session.status({ query: q })
+      if (statusMap && statusMap[sessionId]) {
+        const status = statusMap[sessionId]
+        if (status.type === "idle") {
+          await this.captureResult(itemId, sessionId, q)
+          return
+        }
+        if (status.type === "retry" && status.next) {
+          await new Promise((r) => setTimeout(r, Math.min(status.next - Date.now(), pollIntervalMs)))
+          continue
+        }
+      } else if (statusMap && !statusMap[sessionId]) {
+        // This server only reports non-idle sessions in session.status().
+        // Treat the missing entry as completion only after the session has
+        // produced at least one assistant message.
+        const { data: messages } = await this.client.session.messages({
+          path: { id: sessionId },
+          query: q,
+        })
+        const hasAssistantMessage = Boolean(messages?.some((message) => message.info.role === "assistant"))
+        if (hasAssistantMessage) {
+          await this.captureResult(itemId, sessionId, q)
+          return
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, pollIntervalMs))
+    }
+
+    this.queueManager.updateItem(itemId, {
+      status: "failed",
+      error: "Session timed out after 30 minutes",
+      completedAt: new Date().toISOString(),
+    })
+  }
+
+  private async captureResult(itemId: string, sessionId: string, q: { directory: string }): Promise<void> {
+    try {
+      const { data: messages } = await this.client.session.messages({
+        path: { id: sessionId },
+        query: q,
+      })
+      let result = "Task completed"
+      if (messages && messages.length > 0) {
+        const lastAssistant = [...messages].reverse().find((m) => m.info.role === "assistant")
+        if (lastAssistant) {
+          const textParts = lastAssistant.parts.filter((p) => p.type === "text")
+          if (textParts.length > 0) {
+            result = textParts.map((p) => (p as { type: "text"; text: string }).text).join("\n").substring(0, 1000)
+          }
+        }
+      }
+      this.queueManager.updateItem(itemId, {
+        status: "completed",
+        result,
+        completedAt: new Date().toISOString(),
+        retryCount: 0,
+      })
+    } catch {
+      this.queueManager.updateItem(itemId, {
+        status: "completed",
+        result: "Task completed (could not fetch result)",
+        completedAt: new Date().toISOString(),
+      })
+    }
+  }
+
+  private handleSessionError(itemId: string, err: unknown): void {
+    const item = this.queueManager.getItem(itemId)
+    if (!item) return
+
+    const config = this.queueManager.getConfig()
+    const newRetryCount = item.retryCount + 1
+
+    if (newRetryCount >= config.maxRetries) {
+      this.queueManager.updateItem(itemId, {
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err),
+        retryCount: newRetryCount,
+        completedAt: new Date().toISOString(),
+      })
+      return
+    }
+
+    const delayMinutes = config.retryDelaysMinutes[newRetryCount - 1] || 15
+    this.queueManager.updateItem(itemId, {
+      status: "running",
+      retryCount: newRetryCount,
+      nextRetryAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
+  async processQueue(): Promise<void> {
+    if (!(await FileLock.acquire())) return
+    try {
+      let hasMore = true
+      while (hasMore) {
+        const processed = await this.processNext()
+        if (!processed) {
+          hasMore = false
+          continue
+        }
+
+        const lastActivity = (() => {
+          try {
+            return parseInt(readFileSync(LAST_ACTIVITY_FILE, "utf-8").trim(), 10)
+          } catch {
+            return 0
+          }
+        })()
+        const stillIdle = Date.now() - lastActivity >= this.queueManager.getConfig().idleTimeoutSeconds * 1000
+        if (!stillIdle) {
+          hasMore = false
+        }
+      }
+    } finally {
+      FileLock.release()
+    }
+  }
+
+  getBlockWatcher(): BlockWatcher {
+    return this.blockWatcher
+  }
+}
+
+class SessionGreeter {
+  private messageCounts: Map<string, number> = new Map()
+  private config: QueueConfig
+  private queueManager: QueueManager
+  private client: OpencodeClient
+
+  constructor(config: QueueConfig, queueManager: QueueManager, client: OpencodeClient) {
+    this.config = config
+    this.queueManager = queueManager
+    this.client = client
+  }
+
+  async onSessionCreated(): Promise<void> {
+    this.showToast()
+  }
+
+  async onMessageUpdated(sessionId: string): Promise<void> {
+    const count = (this.messageCounts.get(sessionId) || 0) + 1
+    this.messageCounts.set(sessionId, count)
+    if (count >= this.config.reminderIntervalMessages) {
+      this.messageCounts.set(sessionId, 0)
+      this.showToast()
+    }
+  }
+
+  private showToast(): void {
+    const counts = this.queueManager.countByStatus()
+    const pending = counts["pending"] || 0
+    const blocked = counts["blocked"] || 0
+    const completed = counts["completed"] || 0
+    const running = counts["running"] || 0
+    const failed = counts["failed"] || 0
+
+    const total = pending + blocked + completed + running + failed
+    if (total === 0) return
+
+    const parts: string[] = []
+    if (pending > 0) parts.push(`${pending} pending`)
+    if (blocked > 0) parts.push(`${blocked} blocked`)
+    if (running > 0) parts.push(`${running} running`)
+    if (completed > 0) parts.push(`${completed} completed`)
+    if (failed > 0) parts.push(`${failed} failed`)
+
+    safeToast(this.client, `Queue: ${parts.join(", ")}`, blocked > 0 ? "warning" : "info")
+  }
+}
+
+const OpencodeQueuePlugin: Plugin = async (ctx) => {
+  const client = ctx.client
+
+  const queueManager = new QueueManager()
+  queueManager.resetRunningToPending()
+  const config = queueManager.getConfig()
+
+  const idleDetector = new IdleDetector(config, async () => {
+    const processor = new QueueProcessor(queueManager, client, idleDetector)
+    await processor.processQueue()
+  })
+  idleDetector.start()
+
+  const greeter = new SessionGreeter(config, queueManager, client)
+  const blockWatcher = new BlockWatcher(queueManager, client)
+
+  safeToast(client, "opencode-queue loaded", "info", 3000)
+
+  return {
+    "tool.execute.before": async () => {
+      idleDetector.writeActivity()
+    },
+
+    "tool.execute.after": async () => {
+      idleDetector.writeActivity()
+    },
+
+    event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
+      try {
+        blockWatcher.handleEvent(event)
+        switch (event.type) {
+          case "session.created":
+            await greeter.onSessionCreated()
+            break
+          case "session.updated":
+          case "command.executed":
+          case "tui.command.execute":
+          case "permission.replied":
+          case "question.replied":
+          case "question.rejected":
+            idleDetector.writeActivity()
+            break
+          case "message.updated": {
+            idleDetector.writeActivity()
+            const info = event.properties?.info as { sessionID?: string } | undefined
+            if (info?.sessionID) {
+              await greeter.onMessageUpdated(info.sessionID)
+            }
+            break
+          }
+          case "session.idle":
+            break
+        }
+      } catch {}
+    },
+
+    tool: {
+      "queue-list": tool({
+        description: "List queue items, optionally filtered by status",
+        args: {
+          status: tool.schema.enum(["pending", "running", "blocked", "completed", "failed"]).optional().describe("Filter by status"),
+        },
+        async execute(args) {
+          const items = queueManager.listItems(args.status as string | undefined)
+          if (items.length === 0) return "Queue is empty."
+          return items
+            .map((item) => {
+              let line = `[${item.status.toUpperCase()}] ${item.id.substring(0, 8)} — ${item.goal.substring(0, 80)}`
+              line += `\n  Workspace: ${item.workspace}`
+              if (item.status === "blocked" && item.blockedReason) {
+                line += `\n  Blocked: ${item.blockedReason.details.substring(0, 200)}`
+              }
+              if (item.status === "completed" && item.result) {
+                line += `\n  Result: ${item.result.substring(0, 200)}`
+              }
+              if (item.status === "failed" && item.error) {
+                line += `\n  Error: ${item.error}`
+              }
+              return line
+            })
+            .join("\n\n")
+        },
+      }),
+
+      "queue-add": tool({
+        description: "Add a new item to the queue. Validates workspace directory exists.",
+        args: {
+          workspace: tool.schema.string().describe("Absolute path to project directory"),
+          goal: tool.schema.string().describe("The task description/goal"),
+        },
+        async execute(args) {
+          const result = queueManager.addItem(args.workspace, args.goal)
+          if (!("id" in (result as QueueItem | { error: string }))) return `Error: ${(result as { error: string }).error}`
+          const item = result as QueueItem
+          return `Added item ${item.id} to queue.\nWorkspace: ${item.workspace}\nGoal: ${item.goal}\nStatus: ${item.status}`
+        },
+      }),
+
+      "queue-answer": tool({
+        description: "Respond to a blocked item's question or permission request. Sets item back to pending.",
+        args: {
+          itemId: tool.schema.string().describe("Item ID (full or prefix)"),
+          response: tool.schema.string().describe("The response text"),
+        },
+        async execute(args) {
+          const item = queueManager.getItem(args.itemId) || queueManager.listItems().find((i) => i.id.startsWith(args.itemId))
+          if (!item) return `Error: Item ${args.itemId} not found.`
+          if (item.status !== "blocked") return `Error: Item ${item.id} is not blocked (status: ${item.status}).`
+          const success = await blockWatcher.respondToBlock(item, args.response)
+          if (success) return `Response sent for item ${item.id}. It will be processed on the next idle cycle.`
+          return `Error: Failed to send response for item ${item.id}.`
+        },
+      }),
+
+      "queue-status": tool({
+        description: "Show full details for one queue item including result, session ID, blocked reason.",
+        args: {
+          itemId: tool.schema.string().describe("Item ID (full or prefix)"),
+        },
+        async execute(args) {
+          const item = queueManager.getItem(args.itemId) || queueManager.listItems().find((i) => i.id.startsWith(args.itemId))
+          if (!item) return `Error: Item ${args.itemId} not found.`
+          let output = `ID: ${item.id}\nWorkspace: ${item.workspace}\nGoal: ${item.goal}\nStatus: ${item.status}`
+          output += `\nCreated: ${item.createdAt}`
+          if (item.startedAt) output += `\nStarted: ${item.startedAt}`
+          if (item.completedAt) output += `\nCompleted: ${item.completedAt}`
+          if (item.sessionId) output += `\nSession: ${item.sessionId}`
+          if (item.sessionUrl) output += `\nURL: ${item.sessionUrl || "N/A"}`
+          if (item.retryCount > 0) output += `\nRetries: ${item.retryCount}`
+          if (item.blockedReason) output += `\nBlocked (${item.blockedReason.type}): ${item.blockedReason.details}`
+          if (item.result) output += `\nResult: ${item.result}`
+          if (item.error) output += `\nError: ${item.error}`
+          return output
+        },
+      }),
+
+      "queue-remove": tool({
+        description: "Remove an item from the queue. Aborts its session if running.",
+        args: {
+          itemId: tool.schema.string().describe("Item ID (full or prefix)"),
+        },
+        async execute(args) {
+          const item = queueManager.getItem(args.itemId) || queueManager.listItems().find((i) => i.id.startsWith(args.itemId))
+          if (!item) return `Error: Item ${args.itemId} not found.`
+          if (item.sessionId) {
+            try {
+              await client.session.abort({
+                path: { id: item.sessionId },
+                query: { directory: item.workspace },
+              })
+            } catch {}
+          }
+          const removed = queueManager.removeItem(item.id)
+          return removed ? `Removed item ${item.id}.` : `Error: Could not remove item ${item.id}.`
+        },
+      }),
+
+      "queue-log": tool({
+        description: "Show session URL and last messages for a queue item.",
+        args: {
+          itemId: tool.schema.string().describe("Item ID (full or prefix)"),
+        },
+        async execute(args) {
+          const item = queueManager.getItem(args.itemId) || queueManager.listItems().find((i) => i.id.startsWith(args.itemId))
+          if (!item) return `Error: Item ${args.itemId} not found.`
+          if (!item.sessionId) return `No session for item ${item.id}.`
+          let output = `Session: ${item.sessionId}\nURL: ${item.sessionUrl || "N/A"}\n\n`
+          try {
+            const { data: messages } = await client.session.messages({
+              path: { id: item.sessionId! },
+              query: { directory: item.workspace },
+            })
+            if (messages) {
+              for (const msg of messages.slice(-6)) {
+                const role = msg.info.role
+                const textParts = msg.parts.filter((p) => p.type === "text")
+                for (const p of textParts) {
+                  const text = (p as { type: "text"; text: string }).text
+                  output += `[${role}] ${text.substring(0, 500)}\n\n`
+                }
+              }
+            }
+          } catch {
+            output += "(Could not fetch messages)"
+          }
+          return output
+        },
+      }),
+
+      "queue-retry": tool({
+        description: "Reset a failed item back to pending for reprocessing.",
+        args: {
+          itemId: tool.schema.string().describe("Item ID (full or prefix)"),
+        },
+        async execute(args) {
+          const item = queueManager.getItem(args.itemId) || queueManager.listItems().find((i) => i.id.startsWith(args.itemId))
+          if (!item) return `Error: Item ${args.itemId} not found.`
+          if (item.status !== "failed") return `Error: Item ${item.id} is not failed (status: ${item.status}). Use queue-list to see all items.`
+          queueManager.updateItem(item.id, {
+            status: "pending",
+            retryCount: 0,
+            nextRetryAt: null,
+            error: null,
+          })
+          return `Item ${item.id} reset to pending. It will be processed on the next idle cycle.`
+        },
+      }),
+    },
+  }
+}
+
+function safeToast(
+  client: OpencodeClient,
+  message: string,
+  variant: "info" | "success" | "warning" | "error",
+  duration?: number,
+): void {
+  void client.tui
+    .showToast({
+      body: {
+        message,
+        variant,
+        duration,
+      },
+    })
+    .catch(() => {})
+}
+
+export const internals = {
+  QueueManager,
+  IdleDetector,
+  FileLock,
+  QueueProcessor,
+  BlockWatcher,
+  SessionGreeter,
+}
+
+export type { QueueConfig, QueueItem, QueueStore, BlockedReason }
+export default OpencodeQueuePlugin

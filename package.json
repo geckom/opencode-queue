@@ -1,0 +1,49 @@
+{
+  "name": "opencode-queue",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that maintains a global task queue and processes queued work when OpenCode is idle.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/opencode-plugin.js",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/geckom/opencode-queue.git"
+  },
+  "bugs": {
+    "url": "https://github.com/geckom/opencode-queue/issues"
+  },
+  "homepage": "https://github.com/geckom/opencode-queue#readme",
+  "exports": {
+    ".": {
+      "import": "./dist/opencode-plugin.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "queue",
+    "automation"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "build:runtime": "npm run build && mkdir -p \"$HOME/.config/opencode/plugins\" \"$HOME/.config/opencode/plugin/opencode-queue\" && cp dist/opencode-queue.js \"$HOME/.config/opencode/plugin/opencode-queue/index.js\" && printf 'export { default } from \"../plugin/opencode-queue/index.js\"\\n' > \"$HOME/.config/opencode/plugins/opencode-queue.js\" && rm -f \"$HOME/.config/opencode/plugins/executive-assistant.js\" \"$HOME/.config/opencode/plugins/executive-assistant.impl.js\" && rm -rf \"$HOME/.config/opencode/plugin/executive-assistant\"",
+    "pack:check": "npm pack --dry-run",
+    "test": "node --test test/plugin.test.mjs"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.14.46",
+    "@opencode-ai/sdk": "1.14.46"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "typescript": "^5.9.3"
+  }
+}

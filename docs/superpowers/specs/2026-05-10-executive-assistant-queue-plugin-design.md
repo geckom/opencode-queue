@@ -1,5 +1,7 @@
 # Executive Assistant Queue Plugin — Design Spec
 
+> Historical note: the implementation described here was later renamed and packaged publicly as `opencode-queue`.
+
 ## Summary
 
 An OpenCode plugin that maintains a task queue in a JSON file. When opencode has been idle for a configurable period, the plugin processes queued items one by one using the opencode SDK. Items that hit permission prompts or questions are marked as blocked and saved for the user to respond to later. The user interacts with the queue via custom tools registered by the plugin.

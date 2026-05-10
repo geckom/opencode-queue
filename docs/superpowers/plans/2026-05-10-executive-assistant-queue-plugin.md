@@ -1,5 +1,7 @@
 # Executive Assistant Queue Plugin — Implementation Plan
 
+> Historical note: the implementation described here was later renamed and packaged publicly as `opencode-queue`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build an OpenCode plugin that maintains a global task queue in JSON, processes items via the SDK when idle, handles blocks for permissions/questions, and exposes custom tools for queue management.
