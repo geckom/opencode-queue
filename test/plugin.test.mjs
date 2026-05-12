@@ -87,7 +87,7 @@ test("queue tools work from the built plugin", async () => {
       workspace,
       goal: "Fix the plugin",
     })
-    assert.match(addResult, /Added item/)
+    assert.match(addResult, /Added /)
 
     const listResult = await hooks.tool["queue-list"].execute({})
     assert.match(listResult, /Fix the plugin/)
@@ -96,7 +96,7 @@ test("queue tools work from the built plugin", async () => {
     const store = JSON.parse(readFileSync(queuePath, "utf8"))
     const itemId = store.items[0].id
 
-    const statusResult = await hooks.tool["queue-status"].execute({ itemId })
+    const statusResult = await hooks.tool["queue-list"].execute({ itemId, view: "full" })
     assert.match(statusResult, new RegExp(itemId))
 
     const removeResult = await hooks.tool["queue-remove"].execute({ itemId })
@@ -127,7 +127,7 @@ test("processor completes a pending item and stores the result", async () => {
     assert.ok("id" in created)
 
     const client = createMockClient()
-    const idleDetector = new IdleDetector(queueManager.getConfig(), async () => {})
+    const idleDetector = new IdleDetector(() => queueManager.getConfig(), async () => {})
     const processor = new QueueProcessor(queueManager, client, idleDetector, new URL("http://127.0.0.1:4096"))
 
     const processed = await processor.processNext()
@@ -163,7 +163,7 @@ test("processor treats a missing session.status entry as completed", async () =>
     const client = createMockClient()
     client.session.status = async () => ({ data: {} })
 
-    const idleDetector = new IdleDetector(queueManager.getConfig(), async () => {})
+    const idleDetector = new IdleDetector(() => queueManager.getConfig(), async () => {})
     const processor = new QueueProcessor(queueManager, client, idleDetector, new URL("http://127.0.0.1:4096"))
 
     const processed = await processor.processNext()
@@ -224,7 +224,7 @@ test("processor does not complete early on a missing status before assistant out
       }
     }
 
-    const idleDetector = new IdleDetector(queueManager.getConfig(), async () => {})
+    const idleDetector = new IdleDetector(() => queueManager.getConfig(), async () => {})
     const processor = new QueueProcessor(queueManager, client, idleDetector, new URL("http://127.0.0.1:4096"))
 
     const processed = await processor.processNext()
@@ -276,6 +276,37 @@ test("permission events move running items into blocked state", async () => {
     assert.equal(item?.status, "blocked")
     assert.equal(item?.blockedReason?.type, "permission")
     assert.equal(item?.blockedReason?.permissionId, "perm-1")
+  } finally {
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("idle detector uses updated config from queue.json without plugin reload", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+
+  try {
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const { QueueManager, IdleDetector } = OpencodeQueuePlugin.__internals
+
+    const queueManager = new QueueManager()
+    let idleCalls = 0
+    const idleDetector = new IdleDetector(() => queueManager.getConfig(), async () => {
+      idleCalls += 1
+    })
+
+    idleDetector.writeActivity()
+    await sleep(5)
+    await queueManager.updateConfig({ idleTimeoutSeconds: 0 })
+    await idleDetector.checkIdle()
+
+    assert.equal(idleCalls, 1)
   } finally {
     try {
       const pluginModule = await loadPluginModule(configHome)
@@ -397,7 +428,7 @@ test("processor uses serverUrl when storing session links", async () => {
     assert.ok("id" in created)
 
     const client = createMockClient()
-    const idleDetector = new IdleDetector(queueManager.getConfig(), async () => {})
+    const idleDetector = new IdleDetector(() => queueManager.getConfig(), async () => {})
     const processor = new QueueProcessor(queueManager, client, idleDetector, new URL("http://0.0.0.0:4096/base/"))
 
     const processed = await processor.processNext()
@@ -468,7 +499,7 @@ test("stale processing lock can be taken over by a new processor", async () => {
     utimesSync(lockPath, stale, stale)
 
     const client = createMockClient()
-    const idleDetector = new IdleDetector(queueManager.getConfig(), async () => {})
+    const idleDetector = new IdleDetector(() => queueManager.getConfig(), async () => {})
     const processor = new QueueProcessor(queueManager, client, idleDetector, new URL("http://127.0.0.1:4096"))
 
     await processor.processQueue()

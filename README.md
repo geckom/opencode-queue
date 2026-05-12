@@ -6,7 +6,7 @@ This repo is the source of truth for the plugin formerly developed under the wor
 
 ## What It Does
 
-- adds queue management tools such as `queue-add`, `queue-list`, `queue-status`, `queue-answer`, `queue-remove`, `queue-log`, and `queue-retry`
+- adds queue management tools such as `queue-add`, `queue-list`, `queue-answer`, `queue-remove`, and `queue-retry`
 - stores queue state in a shared JSON file
 - watches global activity through `queue.last-activity`
 - processes one queued item at a time when OpenCode becomes idle
