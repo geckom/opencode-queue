@@ -9,6 +9,16 @@ const OPENCODE_DIR = join(CONFIG_DIR, "opencode")
 const QUEUE_FILE = join(OPENCODE_DIR, "queue.json")
 const LAST_ACTIVITY_FILE = join(OPENCODE_DIR, "queue.last-activity")
 const LOCK_FILE = join(OPENCODE_DIR, "queue.lock")
+const STORE_LOCK_FILE = join(OPENCODE_DIR, "queue.store.lock")
+const PROCESSING_LOCK_STALE_MS = 120_000
+const PROCESSING_LOCK_REFRESH_MS = 30_000
+const STORE_LOCK_STALE_MS = 15_000
+const STORE_LOCK_RETRY_MS = 50
+const STORE_LOCK_WAIT_MS = 5_000
+const SIGNAL_EXIT_CODE: Record<"SIGINT" | "SIGTERM", number> = {
+  SIGINT: 130,
+  SIGTERM: 143,
+}
 
 interface QueueConfig {
   idleTimeoutSeconds: number
@@ -57,6 +67,10 @@ const DEFAULT_CONFIG: QueueConfig = {
   reminderIntervalMessages: 30,
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 class QueueManager {
   private readStore(): QueueStore {
     try {
@@ -95,49 +109,58 @@ class QueueManager {
     return this.readStore().items.find((item) => item.id === id)
   }
 
-  addItem(workspace: string, goal: string): QueueItem | { error: string } {
+  async addItem(workspace: string, goal: string): Promise<QueueItem | { error: string }> {
     const absWorkspace = resolve(workspace)
     if (!existsSync(absWorkspace)) {
       return { error: `Directory not found: ${absWorkspace}` }
     }
-    const store = this.readStore()
-    const item: QueueItem = {
-      id: randomUUID(),
-      workspace: absWorkspace,
-      goal,
-      status: "pending",
-      sessionId: null,
-      createdAt: new Date().toISOString(),
-      startedAt: null,
-      completedAt: null,
-      blockedReason: null,
-      error: null,
-      result: null,
-      sessionUrl: null,
-      retryCount: 0,
-      nextRetryAt: null,
+    if (!statSync(absWorkspace).isDirectory()) {
+      return { error: `Path is not a directory: ${absWorkspace}` }
     }
-    store.items.push(item)
-    this.writeStore(store)
-    return item
+    return FileLock.withLock(STORE_LOCK_FILE, STORE_LOCK_STALE_MS, STORE_LOCK_RETRY_MS, STORE_LOCK_WAIT_MS, async () => {
+      const store = this.readStore()
+      const item: QueueItem = {
+        id: randomUUID(),
+        workspace: absWorkspace,
+        goal,
+        status: "pending",
+        sessionId: null,
+        createdAt: new Date().toISOString(),
+        startedAt: null,
+        completedAt: null,
+        blockedReason: null,
+        error: null,
+        result: null,
+        sessionUrl: null,
+        retryCount: 0,
+        nextRetryAt: null,
+      }
+      store.items.push(item)
+      this.writeStore(store)
+      return item
+    })
   }
 
-  updateItem(id: string, updates: Partial<QueueItem>): QueueItem | undefined {
-    const store = this.readStore()
-    const idx = store.items.findIndex((item) => item.id === id)
-    if (idx === -1) return undefined
-    Object.assign(store.items[idx], updates)
-    this.writeStore(store)
-    return store.items[idx]
+  async updateItem(id: string, updates: Partial<QueueItem>): Promise<QueueItem | undefined> {
+    return FileLock.withLock(STORE_LOCK_FILE, STORE_LOCK_STALE_MS, STORE_LOCK_RETRY_MS, STORE_LOCK_WAIT_MS, async () => {
+      const store = this.readStore()
+      const idx = store.items.findIndex((item) => item.id === id)
+      if (idx === -1) return undefined
+      Object.assign(store.items[idx], updates)
+      this.writeStore(store)
+      return store.items[idx]
+    })
   }
 
-  removeItem(id: string): boolean {
-    const store = this.readStore()
-    const idx = store.items.findIndex((item) => item.id === id)
-    if (idx === -1) return false
-    store.items.splice(idx, 1)
-    this.writeStore(store)
-    return true
+  async removeItem(id: string): Promise<boolean> {
+    return FileLock.withLock(STORE_LOCK_FILE, STORE_LOCK_STALE_MS, STORE_LOCK_RETRY_MS, STORE_LOCK_WAIT_MS, async () => {
+      const store = this.readStore()
+      const idx = store.items.findIndex((item) => item.id === id)
+      if (idx === -1) return false
+      store.items.splice(idx, 1)
+      this.writeStore(store)
+      return true
+    })
   }
 
   getNextPending(): QueueItem | undefined {
@@ -161,16 +184,18 @@ class QueueManager {
     return counts
   }
 
-  resetRunningToPending(): void {
-    const store = this.readStore()
-    let changed = false
-    for (const item of store.items) {
-      if (item.status === "running") {
-        item.status = "pending"
-        changed = true
+  async resetRunningToPending(): Promise<void> {
+    await FileLock.withLock(STORE_LOCK_FILE, STORE_LOCK_STALE_MS, STORE_LOCK_RETRY_MS, STORE_LOCK_WAIT_MS, async () => {
+      const store = this.readStore()
+      let changed = false
+      for (const item of store.items) {
+        if (item.status === "running") {
+          item.status = "pending"
+          changed = true
+        }
       }
-    }
-    if (changed) this.writeStore(store)
+      if (changed) this.writeStore(store)
+    })
   }
 }
 
@@ -222,32 +247,76 @@ class IdleDetector {
 }
 
 class FileLock {
-  static async acquire(): Promise<boolean> {
+  static async acquire(lockFile = LOCK_FILE, staleMs = PROCESSING_LOCK_STALE_MS): Promise<boolean> {
     try {
       if (!existsSync(OPENCODE_DIR)) {
         mkdirSync(OPENCODE_DIR, { recursive: true })
       }
-      if (existsSync(LOCK_FILE)) {
-        const stat = statSync(LOCK_FILE)
-        if (Date.now() - stat.mtimeMs > 30 * 60 * 1000) {
-          unlinkSync(LOCK_FILE)
+      if (existsSync(lockFile)) {
+        const stat = statSync(lockFile)
+        if (Date.now() - stat.mtimeMs > staleMs) {
+          unlinkSync(lockFile)
         } else {
           return false
         }
       }
-      writeFileSync(LOCK_FILE, `${process.pid}\n${Date.now()}`, "utf-8")
+      writeFileSync(lockFile, `${process.pid}\n${Date.now()}`, "utf-8")
       return true
     } catch {
       return false
     }
   }
 
-  static release(): void {
+  static refresh(lockFile = LOCK_FILE): void {
     try {
-      if (existsSync(LOCK_FILE)) {
-        unlinkSync(LOCK_FILE)
+      if (!existsSync(OPENCODE_DIR)) {
+        mkdirSync(OPENCODE_DIR, { recursive: true })
+      }
+      writeFileSync(lockFile, `${process.pid}\n${Date.now()}`, "utf-8")
+    } catch {}
+  }
+
+  static startHeartbeat(lockFile = LOCK_FILE, refreshMs = PROCESSING_LOCK_REFRESH_MS): ReturnType<typeof setInterval> {
+    const timer = setInterval(() => {
+      this.refresh(lockFile)
+    }, refreshMs)
+    timer.unref?.()
+    return timer
+  }
+
+  static stopHeartbeat(timer: ReturnType<typeof setInterval> | null): void {
+    if (timer) {
+      clearInterval(timer)
+    }
+  }
+
+  static release(lockFile = LOCK_FILE): void {
+    try {
+      if (existsSync(lockFile)) {
+        unlinkSync(lockFile)
       }
     } catch {}
+  }
+
+  static async withLock<T>(
+    lockFile: string,
+    staleMs: number,
+    retryMs: number,
+    timeoutMs: number,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const deadline = Date.now() + timeoutMs
+    while (!(await this.acquire(lockFile, staleMs))) {
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out acquiring lock: ${lockFile}`)
+      }
+      await sleep(retryMs)
+    }
+    try {
+      return await work()
+    } finally {
+      this.release(lockFile)
+    }
   }
 }
 
@@ -260,7 +329,7 @@ class BlockWatcher {
     this.client = client
   }
 
-  handleEvent(event: { type: string; properties?: Record<string, unknown> }): void {
+  async handleEvent(event: { type: string; properties?: Record<string, unknown> }): Promise<void> {
     if (event.type === "permission.asked") {
       const permission = event.properties as
         | {
@@ -282,7 +351,7 @@ class BlockWatcher {
         .filter(Boolean)
         .join(" | ")
 
-      this.queueManager.updateItem(item.id, {
+      await this.queueManager.updateItem(item.id, {
         status: "blocked",
         blockedReason: {
           type: "permission",
@@ -327,7 +396,7 @@ class BlockWatcher {
           : [],
       )
 
-      this.queueManager.updateItem(item.id, {
+      await this.queueManager.updateItem(item.id, {
         status: "blocked",
         blockedReason: {
           type: "question",
@@ -361,7 +430,7 @@ class BlockWatcher {
             part.state.status === "pending"
           ) {
             const input = part.state.input as Record<string, unknown>
-            this.queueManager.updateItem(item.id, {
+            await this.queueManager.updateItem(item.id, {
               status: "blocked",
               blockedReason: {
                 type: "question",
@@ -415,7 +484,7 @@ class BlockWatcher {
         })
       }
 
-      this.queueManager.updateItem(item.id, {
+      await this.queueManager.updateItem(item.id, {
         status: "pending",
         blockedReason: {
           ...item.blockedReason,
@@ -435,11 +504,13 @@ class QueueProcessor {
   private queueManager: QueueManager
   private client: OpencodeClient
   private idleDetector: IdleDetector
+  private serverUrl: URL
 
-  constructor(queueManager: QueueManager, client: OpencodeClient, idleDetector: IdleDetector) {
+  constructor(queueManager: QueueManager, client: OpencodeClient, idleDetector: IdleDetector, serverUrl: URL) {
     this.queueManager = queueManager
     this.client = client
     this.idleDetector = idleDetector
+    this.serverUrl = serverUrl
     this.blockWatcher = new BlockWatcher(queueManager, client)
   }
 
@@ -451,7 +522,7 @@ class QueueProcessor {
     this.isProcessing = true
     try {
       if (!existsSync(item.workspace)) {
-        this.queueManager.updateItem(item.id, {
+        await this.queueManager.updateItem(item.id, {
           status: "failed",
           error: `Directory not found: ${item.workspace}`,
           completedAt: new Date().toISOString(),
@@ -469,7 +540,7 @@ class QueueProcessor {
           body: { title: item.goal.substring(0, 100) },
         })
         if (!session) {
-          this.queueManager.updateItem(item.id, {
+          await this.queueManager.updateItem(item.id, {
             status: "failed",
             error: "Failed to create session",
           })
@@ -477,14 +548,14 @@ class QueueProcessor {
           return true
         }
         sessionId = session.id
-        this.queueManager.updateItem(item.id, {
+        await this.queueManager.updateItem(item.id, {
           sessionId: session.id,
-          sessionUrl: `http://localhost:4096/session/${session.id}`,
+          sessionUrl: new URL(`/session/${session.id}`, this.serverUrl).toString(),
           startedAt: new Date().toISOString(),
           status: "running",
         })
       } else {
-        this.queueManager.updateItem(item.id, { status: "running" })
+        await this.queueManager.updateItem(item.id, { status: "running" })
       }
 
       await this.client.session.promptAsync({
@@ -546,7 +617,7 @@ class QueueProcessor {
       await new Promise((r) => setTimeout(r, pollIntervalMs))
     }
 
-    this.queueManager.updateItem(itemId, {
+    await this.queueManager.updateItem(itemId, {
       status: "failed",
       error: "Session timed out after 30 minutes",
       completedAt: new Date().toISOString(),
@@ -569,14 +640,14 @@ class QueueProcessor {
           }
         }
       }
-      this.queueManager.updateItem(itemId, {
+      await this.queueManager.updateItem(itemId, {
         status: "completed",
         result,
         completedAt: new Date().toISOString(),
         retryCount: 0,
       })
     } catch {
-      this.queueManager.updateItem(itemId, {
+      await this.queueManager.updateItem(itemId, {
         status: "completed",
         result: "Task completed (could not fetch result)",
         completedAt: new Date().toISOString(),
@@ -592,7 +663,7 @@ class QueueProcessor {
     const newRetryCount = item.retryCount + 1
 
     if (newRetryCount >= config.maxRetries) {
-      this.queueManager.updateItem(itemId, {
+      void this.queueManager.updateItem(itemId, {
         status: "failed",
         error: err instanceof Error ? err.message : String(err),
         retryCount: newRetryCount,
@@ -602,7 +673,7 @@ class QueueProcessor {
     }
 
     const delayMinutes = config.retryDelaysMinutes[newRetryCount - 1] || 15
-    this.queueManager.updateItem(itemId, {
+    void this.queueManager.updateItem(itemId, {
       status: "running",
       retryCount: newRetryCount,
       nextRetryAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
@@ -611,7 +682,8 @@ class QueueProcessor {
   }
 
   async processQueue(): Promise<void> {
-    if (!(await FileLock.acquire())) return
+    if (!(await FileLock.acquire(LOCK_FILE, PROCESSING_LOCK_STALE_MS))) return
+    const heartbeat = FileLock.startHeartbeat(LOCK_FILE, PROCESSING_LOCK_REFRESH_MS)
     try {
       let hasMore = true
       while (hasMore) {
@@ -634,7 +706,8 @@ class QueueProcessor {
         }
       }
     } finally {
-      FileLock.release()
+      FileLock.stopHeartbeat(heartbeat)
+      FileLock.release(LOCK_FILE)
     }
   }
 
@@ -690,62 +763,131 @@ class SessionGreeter {
   }
 }
 
-const OpencodeQueuePlugin: Plugin = async (ctx) => {
-  const client = ctx.client
+const SHARED_STATE_KEY = Symbol.for("opencode.queue.shared-state")
 
+interface SharedState {
+  queueManager: QueueManager
+  config: QueueConfig
+  idleDetector: IdleDetector
+  coordinatorClaimed: boolean
+  initialized: Promise<void>
+  cleanupHandlers: Array<{
+    event: "exit" | "beforeExit" | NodeJS.Signals
+    handler: () => void
+  }>
+  cleanedUp: boolean
+}
+
+function createSharedState(client: OpencodeClient, serverUrl: URL): SharedState {
   const queueManager = new QueueManager()
-  queueManager.resetRunningToPending()
   const config = queueManager.getConfig()
-
   const idleDetector = new IdleDetector(config, async () => {
-    const processor = new QueueProcessor(queueManager, client, idleDetector)
+    const processor = new QueueProcessor(queueManager, client, idleDetector, serverUrl)
     await processor.processQueue()
   })
-  idleDetector.start()
+
+  return {
+    queueManager,
+    config,
+    idleDetector,
+    coordinatorClaimed: false,
+    initialized: queueManager.resetRunningToPending(),
+    cleanupHandlers: [],
+    cleanedUp: false,
+  }
+}
+
+function cleanupSharedState(shared: SharedState): void {
+  if (shared.cleanedUp) return
+  shared.cleanedUp = true
+  shared.idleDetector.stop()
+  FileLock.release(LOCK_FILE)
+}
+
+function registerProcessCleanup(shared: SharedState): void {
+  if (shared.cleanupHandlers.length > 0) return
+
+  const onExit = () => {
+    cleanupSharedState(shared)
+  }
+  const onBeforeExit = () => {
+    cleanupSharedState(shared)
+  }
+  const registerSignalHandler = (signal: "SIGINT" | "SIGTERM") => {
+    const handler = () => {
+      cleanupSharedState(shared)
+      process.exit(SIGNAL_EXIT_CODE[signal] ?? 0)
+    }
+    process.once(signal, handler)
+    shared.cleanupHandlers.push({ event: signal, handler })
+  }
+
+  process.once("exit", onExit)
+  shared.cleanupHandlers.push({ event: "exit", handler: onExit })
+  process.once("beforeExit", onBeforeExit)
+  shared.cleanupHandlers.push({ event: "beforeExit", handler: onBeforeExit })
+  registerSignalHandler("SIGINT")
+  registerSignalHandler("SIGTERM")
+}
+
+function unregisterProcessCleanup(shared: SharedState): void {
+  for (const { event, handler } of shared.cleanupHandlers) {
+    process.removeListener(event, handler)
+  }
+  shared.cleanupHandlers = []
+}
+
+function getSharedState(client: OpencodeClient, serverUrl: URL): SharedState {
+  const globalState = globalThis as typeof globalThis & {
+    [SHARED_STATE_KEY]?: SharedState
+  }
+  if (!globalState[SHARED_STATE_KEY]) {
+    globalState[SHARED_STATE_KEY] = createSharedState(client, serverUrl)
+  }
+  return globalState[SHARED_STATE_KEY]
+}
+
+function resetSharedState(): void {
+  const globalState = globalThis as typeof globalThis & {
+    [SHARED_STATE_KEY]?: SharedState
+  }
+  if (globalState[SHARED_STATE_KEY]) {
+    unregisterProcessCleanup(globalState[SHARED_STATE_KEY]!)
+    cleanupSharedState(globalState[SHARED_STATE_KEY]!)
+  }
+  delete globalState[SHARED_STATE_KEY]
+}
+
+const OpencodeQueuePlugin: Plugin = async (ctx) => {
+  const client = ctx.client
+  const shared = getSharedState(client, ctx.serverUrl)
+  await shared.initialized
+  shared.cleanedUp = false
+  const { queueManager, config, idleDetector } = shared
+  const isCoordinator = !shared.coordinatorClaimed
+  if (isCoordinator) {
+    shared.coordinatorClaimed = true
+    registerProcessCleanup(shared)
+    idleDetector.start()
+  }
 
   const greeter = new SessionGreeter(config, queueManager, client)
   const blockWatcher = new BlockWatcher(queueManager, client)
 
-  safeToast(client, "opencode-queue loaded", "info", 3000)
+  if (isCoordinator) {
+    safeToast(client, "opencode-queue loaded", "info", 3000)
+  }
 
-  return {
+  const hooks: Awaited<ReturnType<Plugin>> = {
+    "chat.message": async () => {
+      idleDetector.writeActivity()
+    },
     "tool.execute.before": async () => {
       idleDetector.writeActivity()
     },
-
     "tool.execute.after": async () => {
       idleDetector.writeActivity()
     },
-
-    event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
-      try {
-        blockWatcher.handleEvent(event)
-        switch (event.type) {
-          case "session.created":
-            await greeter.onSessionCreated()
-            break
-          case "session.updated":
-          case "command.executed":
-          case "tui.command.execute":
-          case "permission.replied":
-          case "question.replied":
-          case "question.rejected":
-            idleDetector.writeActivity()
-            break
-          case "message.updated": {
-            idleDetector.writeActivity()
-            const info = event.properties?.info as { sessionID?: string } | undefined
-            if (info?.sessionID) {
-              await greeter.onMessageUpdated(info.sessionID)
-            }
-            break
-          }
-          case "session.idle":
-            break
-        }
-      } catch {}
-    },
-
     tool: {
       "queue-list": tool({
         description: "List queue items, optionally filtered by status",
@@ -781,7 +923,7 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
           goal: tool.schema.string().describe("The task description/goal"),
         },
         async execute(args) {
-          const result = queueManager.addItem(args.workspace, args.goal)
+          const result = await queueManager.addItem(args.workspace, args.goal)
           if (!("id" in (result as QueueItem | { error: string }))) return `Error: ${(result as { error: string }).error}`
           const item = result as QueueItem
           return `Added item ${item.id} to queue.\nWorkspace: ${item.workspace}\nGoal: ${item.goal}\nStatus: ${item.status}`
@@ -842,7 +984,7 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
               })
             } catch {}
           }
-          const removed = queueManager.removeItem(item.id)
+          const removed = await queueManager.removeItem(item.id)
           return removed ? `Removed item ${item.id}.` : `Error: Could not remove item ${item.id}.`
         },
       }),
@@ -888,7 +1030,7 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
           const item = queueManager.getItem(args.itemId) || queueManager.listItems().find((i) => i.id.startsWith(args.itemId))
           if (!item) return `Error: Item ${args.itemId} not found.`
           if (item.status !== "failed") return `Error: Item ${item.id} is not failed (status: ${item.status}). Use queue-list to see all items.`
-          queueManager.updateItem(item.id, {
+          await queueManager.updateItem(item.id, {
             status: "pending",
             retryCount: 0,
             nextRetryAt: null,
@@ -899,6 +1041,39 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
       }),
     },
   }
+
+  if (isCoordinator) {
+    hooks.event = async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
+      try {
+        await blockWatcher.handleEvent(event)
+        switch (event.type) {
+          case "session.created":
+            await greeter.onSessionCreated()
+            break
+          case "session.updated":
+          case "command.executed":
+          case "tui.command.execute":
+          case "permission.replied":
+          case "question.replied":
+          case "question.rejected":
+            idleDetector.writeActivity()
+            break
+          case "message.updated": {
+            idleDetector.writeActivity()
+            const info = event.properties?.info as { sessionID?: string } | undefined
+            if (info?.sessionID) {
+              await greeter.onMessageUpdated(info.sessionID)
+            }
+            break
+          }
+          case "session.idle":
+            break
+        }
+      } catch {}
+    }
+  }
+
+  return hooks
 }
 
 function safeToast(
@@ -925,6 +1100,7 @@ const internals = {
   QueueProcessor,
   BlockWatcher,
   SessionGreeter,
+  resetSharedState,
 }
 
 export type { QueueConfig, QueueItem, QueueStore, BlockedReason }
