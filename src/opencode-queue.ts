@@ -41,11 +41,18 @@ interface QueueItem {
   id: string
   workspace: string
   goal: string
-  status: "pending" | "running" | "blocked" | "completed" | "failed"
+  status: "pending" | "running" | "blocked" | "review_pending" | "completed" | "failed"
+  parentItemId: string | null
+  dependencyMode: "review_pending" | "completed"
+  dependencySatisfiedAt: string | null
+  dependencySourceStatus: "review_pending" | "completed" | null
+  dependencyBlockedReason: string | null
+  staleDependency: boolean
   sessionId: string | null
   createdAt: string
   startedAt: string | null
   completedAt: string | null
+  reviewedAt?: string | null
   blockedReason: BlockedReason | null
   error: string | null
   result: string | null
@@ -72,6 +79,83 @@ function sleep(ms: number): Promise<void> {
 }
 
 class QueueManager {
+  private normalizeItem(item: Partial<QueueItem>): QueueItem {
+    return {
+      id: String(item.id || randomUUID()),
+      workspace: String(item.workspace || ""),
+      goal: String(item.goal || ""),
+      status: (item.status as QueueItem["status"]) || "pending",
+      parentItemId: item.parentItemId ?? null,
+      dependencyMode: item.dependencyMode === "completed" ? "completed" : "review_pending",
+      dependencySatisfiedAt: item.dependencySatisfiedAt ?? null,
+      dependencySourceStatus:
+        item.dependencySourceStatus === "completed" || item.dependencySourceStatus === "review_pending"
+          ? item.dependencySourceStatus
+          : null,
+      dependencyBlockedReason: item.dependencyBlockedReason ?? null,
+      staleDependency: Boolean(item.staleDependency),
+      sessionId: item.sessionId ?? null,
+      createdAt: String(item.createdAt || new Date().toISOString()),
+      startedAt: item.startedAt ?? null,
+      completedAt: item.completedAt ?? null,
+      reviewedAt: item.reviewedAt ?? null,
+      blockedReason: item.blockedReason ?? null,
+      error: item.error ?? null,
+      result: item.result ?? null,
+      sessionUrl: item.sessionUrl ?? null,
+      retryCount: typeof item.retryCount === "number" ? item.retryCount : 0,
+      nextRetryAt: item.nextRetryAt ?? null,
+    }
+  }
+
+  private wouldCreateDependencyCycle(itemId: string, parentItemId: string | null, items: QueueItem[]): boolean {
+    if (!parentItemId) return false
+    let currentId: string | null = parentItemId
+    const visited = new Set<string>()
+    while (currentId) {
+      if (currentId === itemId) return true
+      if (visited.has(currentId)) return true
+      visited.add(currentId)
+      const parent = items.find((candidate) => candidate.id === currentId)
+      currentId = parent?.parentItemId ?? null
+    }
+    return false
+  }
+
+  private evaluateDependency(
+    item: QueueItem,
+    items: QueueItem[],
+  ): { eligible: boolean; blockedReason: string | null; sourceStatus: "review_pending" | "completed" | null } {
+    if (!item.parentItemId) {
+      return { eligible: true, blockedReason: null, sourceStatus: null }
+    }
+
+    const parent = items.find((candidate) => candidate.id === item.parentItemId)
+    if (!parent) {
+      return { eligible: false, blockedReason: `Parent item ${item.parentItemId} not found.`, sourceStatus: null }
+    }
+
+    if (parent.status === "completed") {
+      return { eligible: true, blockedReason: null, sourceStatus: "completed" }
+    }
+    if (parent.status === "review_pending" && item.dependencyMode === "review_pending") {
+      return { eligible: true, blockedReason: null, sourceStatus: "review_pending" }
+    }
+    if (parent.status === "review_pending") {
+      return { eligible: false, blockedReason: `Waiting for parent ${parent.id} to be completed.`, sourceStatus: null }
+    }
+    if (parent.status === "failed") {
+      return { eligible: false, blockedReason: `Parent ${parent.id} failed.`, sourceStatus: null }
+    }
+    if (parent.status === "blocked") {
+      return { eligible: false, blockedReason: `Parent ${parent.id} is blocked.`, sourceStatus: null }
+    }
+    if (parent.status === "running") {
+      return { eligible: false, blockedReason: `Parent ${parent.id} is running.`, sourceStatus: null }
+    }
+    return { eligible: false, blockedReason: `Waiting for parent ${parent.id} to start.`, sourceStatus: null }
+  }
+
   private normalizeConfig(config?: Partial<QueueConfig> | null): QueueConfig {
     return {
       ...DEFAULT_CONFIG,
@@ -88,7 +172,7 @@ class QueueManager {
       const parsed = JSON.parse(raw) as Partial<QueueStore>
       return {
         config: this.normalizeConfig(parsed.config),
-        items: Array.isArray(parsed.items) ? parsed.items : [],
+        items: Array.isArray(parsed.items) ? parsed.items.map((item) => this.normalizeItem(item)) : [],
       }
     } catch {
       return { config: { ...DEFAULT_CONFIG }, items: [] }
@@ -132,7 +216,11 @@ class QueueManager {
     return this.readStore().items.find((item) => item.id === id)
   }
 
-  async addItem(workspace: string, goal: string): Promise<QueueItem | { error: string }> {
+  async addItem(
+    workspace: string,
+    goal: string,
+    options?: { parentItemId?: string | null; dependencyMode?: "review_pending" | "completed" },
+  ): Promise<QueueItem | { error: string }> {
     const absWorkspace = resolve(workspace)
     if (!existsSync(absWorkspace)) {
       return { error: `Directory not found: ${absWorkspace}` }
@@ -142,21 +230,35 @@ class QueueManager {
     }
     return FileLock.withLock(STORE_LOCK_FILE, STORE_LOCK_STALE_MS, STORE_LOCK_RETRY_MS, STORE_LOCK_WAIT_MS, async () => {
       const store = this.readStore()
+      const parentItemId = options?.parentItemId ?? null
+      if (parentItemId && !store.items.some((item) => item.id === parentItemId)) {
+        return { error: `Parent item not found: ${parentItemId}` }
+      }
       const item: QueueItem = {
         id: randomUUID(),
         workspace: absWorkspace,
         goal,
         status: "pending",
+        parentItemId,
+        dependencyMode: options?.dependencyMode === "completed" ? "completed" : "review_pending",
+        dependencySatisfiedAt: null,
+        dependencySourceStatus: null,
+        dependencyBlockedReason: parentItemId ? `Waiting for parent ${parentItemId} to start.` : null,
+        staleDependency: false,
         sessionId: null,
         createdAt: new Date().toISOString(),
         startedAt: null,
         completedAt: null,
+        reviewedAt: null,
         blockedReason: null,
         error: null,
         result: null,
         sessionUrl: null,
         retryCount: 0,
         nextRetryAt: null,
+      }
+      if (item.parentItemId === item.id || this.wouldCreateDependencyCycle(item.id, item.parentItemId, store.items)) {
+        return { error: `Dependency cycle detected for parent ${item.parentItemId}.` }
       }
       store.items.push(item)
       this.writeStore(store)
@@ -186,16 +288,77 @@ class QueueManager {
     })
   }
 
-  getNextPending(): QueueItem | undefined {
-    const store = this.readStore()
-    const now = Date.now()
-    return store.items.find((item) => {
-      if (item.status === "pending") return true
-      if (item.status === "running" && item.nextRetryAt) {
-        return new Date(item.nextRetryAt).getTime() <= now
+  async markDescendantsStale(parentItemId: string): Promise<void> {
+    await FileLock.withLock(STORE_LOCK_FILE, STORE_LOCK_STALE_MS, STORE_LOCK_RETRY_MS, STORE_LOCK_WAIT_MS, async () => {
+      const store = this.readStore()
+      const descendants = new Set<string>()
+      const queue = [parentItemId]
+      while (queue.length > 0) {
+        const current = queue.shift()!
+        for (const item of store.items) {
+          if (item.parentItemId === current && !descendants.has(item.id)) {
+            descendants.add(item.id)
+            queue.push(item.id)
+          }
+        }
       }
-      return false
+      let changed = false
+      for (const item of store.items) {
+        if (!descendants.has(item.id)) continue
+        if (!["running", "review_pending", "completed", "blocked"].includes(item.status)) continue
+        item.staleDependency = true
+        changed = true
+      }
+      if (changed) this.writeStore(store)
     })
+  }
+
+  async getNextPending(): Promise<QueueItem | undefined> {
+    return FileLock.withLock(
+      STORE_LOCK_FILE,
+      STORE_LOCK_STALE_MS,
+      STORE_LOCK_RETRY_MS,
+      STORE_LOCK_WAIT_MS,
+      async () => {
+        const store = this.readStore()
+        const now = Date.now()
+        let changed = false
+        let nextItem: QueueItem | undefined
+
+        for (const item of store.items) {
+          const isReadyRetry = item.status === "running" && item.nextRetryAt && new Date(item.nextRetryAt).getTime() <= now
+          const isPending = item.status === "pending"
+          if (!isPending && !isReadyRetry) continue
+
+          const dependency = this.evaluateDependency(item, store.items)
+          const nextBlockedReason = dependency.blockedReason
+          if (item.dependencyBlockedReason !== nextBlockedReason) {
+            item.dependencyBlockedReason = nextBlockedReason
+            changed = true
+          }
+
+          if (!dependency.eligible) continue
+
+          if (item.dependencySourceStatus !== dependency.sourceStatus) {
+            item.dependencySourceStatus = dependency.sourceStatus
+            changed = true
+          }
+          if (dependency.sourceStatus && !item.dependencySatisfiedAt) {
+            item.dependencySatisfiedAt = new Date().toISOString()
+            changed = true
+          }
+          if (item.dependencyBlockedReason !== null) {
+            item.dependencyBlockedReason = null
+            changed = true
+          }
+          nextItem = { ...item }
+          break
+        }
+
+        if (changed) this.writeStore(store)
+        return nextItem
+      },
+    )
   }
 
   countByStatus(): Record<string, number> {
@@ -539,7 +702,7 @@ class QueueProcessor {
 
   async processNext(): Promise<boolean> {
     if (this.isProcessing) return false
-    const item = this.queueManager.getNextPending()
+    const item = await this.queueManager.getNextPending()
     if (!item) return false
 
     this.isProcessing = true
@@ -598,6 +761,10 @@ class QueueProcessor {
     } finally {
       this.isProcessing = false
     }
+  }
+
+  async continueSession(itemId: string, sessionId: string, workspace: string): Promise<void> {
+    await this.waitForCompletion(itemId, sessionId, { directory: workspace })
   }
 
   private async waitForCompletion(itemId: string, sessionId: string, q: { directory: string }): Promise<void> {
@@ -664,16 +831,19 @@ class QueueProcessor {
         }
       }
       await this.queueManager.updateItem(itemId, {
-        status: "completed",
+        status: "review_pending",
         result,
-        completedAt: new Date().toISOString(),
+        completedAt: null,
+        reviewedAt: null,
         retryCount: 0,
       })
     } catch {
       await this.queueManager.updateItem(itemId, {
-        status: "completed",
+        status: "review_pending",
         result: "Task completed (could not fetch result)",
-        completedAt: new Date().toISOString(),
+        completedAt: null,
+        reviewedAt: null,
+        retryCount: 0,
       })
     }
   }
@@ -768,16 +938,18 @@ class SessionGreeter {
     const counts = this.queueManager.countByStatus()
     const pending = counts["pending"] || 0
     const blocked = counts["blocked"] || 0
+    const reviewPending = counts["review_pending"] || 0
     const completed = counts["completed"] || 0
     const running = counts["running"] || 0
     const failed = counts["failed"] || 0
 
-    const total = pending + blocked + completed + running + failed
+    const total = pending + blocked + reviewPending + completed + running + failed
     if (total === 0) return
 
     const parts: string[] = []
     if (pending > 0) parts.push(`${pending} pending`)
     if (blocked > 0) parts.push(`${blocked} blocked`)
+    if (reviewPending > 0) parts.push(`${reviewPending} review`)
     if (running > 0) parts.push(`${running} running`)
     if (completed > 0) parts.push(`${completed} completed`)
     if (failed > 0) parts.push(`${failed} failed`)
@@ -884,8 +1056,20 @@ function findQueueItem(queueManager: QueueManager, itemId: string): QueueItem | 
 
 function formatQueueItemSummary(item: QueueItem): string {
   let line = `[${item.status.toUpperCase()}] ${item.id.substring(0, 8)} ${item.goal.substring(0, 80)}`
+  if (item.parentItemId) {
+    line += `\nDepends: ${item.parentItemId.substring(0, 8)} @ ${item.dependencyMode}`
+  }
+  if (item.dependencyBlockedReason && item.status === "pending") {
+    line += `\nWaiting: ${item.dependencyBlockedReason.substring(0, 160)}`
+  }
+  if (item.staleDependency) {
+    line += `\nStale: Parent changed after this item became eligible`
+  }
   if (item.status === "blocked" && item.blockedReason) {
     line += `\nBlocked: ${item.blockedReason.details.substring(0, 160)}`
+  }
+  if (item.status === "review_pending" && item.result) {
+    line += `\nReview: ${item.result.substring(0, 160)}`
   }
   if (item.status === "completed" && item.result) {
     line += `\nResult: ${item.result.substring(0, 160)}`
@@ -898,15 +1082,23 @@ function formatQueueItemSummary(item: QueueItem): string {
 
 function formatQueueItemFull(item: QueueItem): string {
   let output = `ID: ${item.id}\nStatus: ${item.status}\nGoal: ${item.goal}\nWorkspace: ${item.workspace}`
+  if (item.parentItemId) output += `\nParent: ${item.parentItemId}`
+  output += `\nDependency Mode: ${item.dependencyMode}`
+  if (item.dependencySatisfiedAt) output += `\nDependency Satisfied: ${item.dependencySatisfiedAt}`
+  if (item.dependencySourceStatus) output += `\nDependency Source: ${item.dependencySourceStatus}`
+  if (item.dependencyBlockedReason) output += `\nDependency Waiting: ${item.dependencyBlockedReason}`
+  if (item.staleDependency) output += `\nStale Dependency: true`
   output += `\nCreated: ${item.createdAt}`
   if (item.startedAt) output += `\nStarted: ${item.startedAt}`
   if (item.completedAt) output += `\nCompleted: ${item.completedAt}`
+  if (item.reviewedAt) output += `\nReviewed: ${item.reviewedAt}`
   if (item.sessionId) output += `\nSession: ${item.sessionId}`
   if (item.sessionUrl) output += `\nURL: ${item.sessionUrl}`
   if (item.retryCount > 0) output += `\nRetries: ${item.retryCount}`
   if (item.nextRetryAt) output += `\nNext Retry: ${item.nextRetryAt}`
   if (item.blockedReason) output += `\nBlocked (${item.blockedReason.type}): ${item.blockedReason.details}`
-  if (item.result) output += `\nResult: ${item.result}`
+  if (item.status === "review_pending" && item.result) output += `\nReview Result: ${item.result}`
+  else if (item.result) output += `\nResult: ${item.result}`
   if (item.error) output += `\nError: ${item.error}`
   return output
 }
@@ -974,7 +1166,7 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
         description: "Show queue items or one item in summary, full, or log view.",
         args: {
           itemId: tool.schema.string().optional().describe("Item ID or prefix"),
-          status: tool.schema.enum(["pending", "running", "blocked", "completed", "failed"]).optional().describe("Status filter"),
+          status: tool.schema.enum(["pending", "running", "blocked", "review_pending", "completed", "failed"]).optional().describe("Status filter"),
           view: tool.schema.enum(["summary", "full", "log"]).optional().describe("Output style"),
         },
         async execute(args) {
@@ -1002,12 +1194,25 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
         args: {
           workspace: tool.schema.string().describe("Absolute workspace path"),
           goal: tool.schema.string().describe("Task goal"),
+          parentItemId: tool.schema.string().optional().describe("Parent item ID or prefix"),
+          dependencyMode: tool.schema.enum(["review_pending", "completed"]).optional().describe("When parent unlocks this item"),
         },
         async execute(args) {
-          const result = await queueManager.addItem(args.workspace, args.goal)
+          let parentId: string | null = null
+          if (args.parentItemId) {
+            const parent = findQueueItem(queueManager, args.parentItemId)
+            if (!parent) return `Error: Parent item ${args.parentItemId} not found.`
+            parentId = parent.id
+          }
+          const result = await queueManager.addItem(args.workspace, args.goal, {
+            parentItemId: parentId,
+            dependencyMode: args.dependencyMode as "review_pending" | "completed" | undefined,
+          })
           if (!("id" in (result as QueueItem | { error: string }))) return `Error: ${(result as { error: string }).error}`
           const item = result as QueueItem
-          return `Added ${item.id}.\nStatus: ${item.status}\nGoal: ${item.goal}`
+          let output = `Added ${item.id}.\nStatus: ${item.status}\nGoal: ${item.goal}`
+          if (item.parentItemId) output += `\nDepends: ${item.parentItemId} @ ${item.dependencyMode}`
+          return output
         },
       }),
 
@@ -1027,6 +1232,67 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
         },
       }),
 
+      "queue-confirm": tool({
+        description: "Mark a review item complete.",
+        args: {
+          itemId: tool.schema.string().describe("Item ID or prefix"),
+        },
+        async execute(args) {
+          const item = findQueueItem(queueManager, args.itemId)
+          if (!item) return `Error: Item ${args.itemId} not found.`
+          if (item.status !== "review_pending") {
+            return `Error: Item ${item.id} is not awaiting review (status: ${item.status}).`
+          }
+          const now = new Date().toISOString()
+          await queueManager.updateItem(item.id, {
+            status: "completed",
+            completedAt: now,
+            reviewedAt: now,
+            staleDependency: false,
+          })
+          return `Item ${item.id} marked completed.`
+        },
+      }),
+
+      "queue-followup": tool({
+        description: "Send follow-up on a review item.",
+        args: {
+          itemId: tool.schema.string().describe("Item ID or prefix"),
+          message: tool.schema.string().describe("Follow-up message"),
+        },
+        async execute(args) {
+          const item = findQueueItem(queueManager, args.itemId)
+          if (!item) return `Error: Item ${args.itemId} not found.`
+          if (item.status !== "review_pending") {
+            return `Error: Item ${item.id} is not awaiting review (status: ${item.status}).`
+          }
+          if (!item.sessionId) return `Error: Item ${item.id} has no session.`
+
+          try {
+            await client.session.prompt({
+              path: { id: item.sessionId },
+              query: { directory: item.workspace },
+              body: {
+                parts: [{ type: "text", text: args.message }],
+              },
+            })
+          } catch {
+            return `Error: Failed to send follow-up for item ${item.id}.`
+          }
+
+          await queueManager.updateItem(item.id, {
+            status: "running",
+            completedAt: null,
+            reviewedAt: null,
+            result: null,
+          })
+          await queueManager.markDescendantsStale(item.id)
+          const processor = new QueueProcessor(queueManager, client, idleDetector, ctx.serverUrl)
+          await processor.continueSession(item.id, item.sessionId, item.workspace)
+          return `Follow-up sent for ${item.id}.`
+        },
+      }),
+
       "queue-remove": tool({
         description: "Remove a queue item.",
         args: {
@@ -1035,6 +1301,10 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
         async execute(args) {
           const item = findQueueItem(queueManager, args.itemId)
           if (!item) return `Error: Item ${args.itemId} not found.`
+          const dependents = queueManager.listItems().filter((candidate) => candidate.parentItemId === item.id)
+          if (dependents.length > 0) {
+            return `Error: Item ${item.id} has dependent tasks and cannot be removed.`
+          }
           if (item.sessionId) {
             try {
               await client.session.abort({
@@ -1062,6 +1332,7 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
             retryCount: 0,
             nextRetryAt: null,
             error: null,
+            staleDependency: false,
           })
           return `Item ${item.id} reset to pending.`
         },

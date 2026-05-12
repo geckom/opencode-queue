@@ -112,7 +112,62 @@ test("queue tools work from the built plugin", async () => {
   }
 })
 
-test("processor completes a pending item and stores the result", async () => {
+test("queue-add stores parent dependency settings", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  globalThis.setInterval = () => 1
+  globalThis.clearInterval = () => {}
+
+  try {
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const hooks = await OpencodeQueuePlugin({
+      client: createMockClient(),
+      project: { id: "p1", name: "test", root: workspace, path: workspace },
+      directory: workspace,
+      worktree: workspace,
+      serverUrl: new URL("http://127.0.0.1:4096"),
+      experimental_workspace: { register() {} },
+      $: async () => ({ stdout: "", stderr: "" }),
+    })
+
+    const parentResult = await hooks.tool["queue-add"].execute({
+      workspace,
+      goal: "Parent task",
+    })
+    assert.match(parentResult, /Added /)
+
+    const queuePath = join(configHome, "opencode", "queue.json")
+    const store = JSON.parse(readFileSync(queuePath, "utf8"))
+    const parentId = store.items[0].id
+
+    const childResult = await hooks.tool["queue-add"].execute({
+      workspace,
+      goal: "Child task",
+      parentItemId: parentId,
+      dependencyMode: "completed",
+    })
+    assert.match(childResult, /Depends:/)
+
+    const updatedStore = JSON.parse(readFileSync(queuePath, "utf8"))
+    const child = updatedStore.items.find((item) => item.goal === "Child task")
+    assert.equal(child.parentItemId, parentId)
+    assert.equal(child.dependencyMode, "completed")
+  } finally {
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("processor moves a finished pending item into review and stores the result", async () => {
   const configHome = createTempConfigHome()
   const workspace = join(configHome, "workspace")
   mkdirSync(workspace, { recursive: true })
@@ -134,9 +189,10 @@ test("processor completes a pending item and stores the result", async () => {
     assert.equal(processed, true)
 
     const item = queueManager.listItems()[0]
-    assert.equal(item.status, "completed")
+    assert.equal(item.status, "review_pending")
     assert.match(item.result, /Task finished successfully/)
     assert.equal(item.sessionId, "s1")
+    assert.equal(item.completedAt, null)
   } finally {
     try {
       const pluginModule = await loadPluginModule(configHome)
@@ -146,7 +202,7 @@ test("processor completes a pending item and stores the result", async () => {
   }
 })
 
-test("processor treats a missing session.status entry as completed", async () => {
+test("processor treats a missing session.status entry as review-ready", async () => {
   const configHome = createTempConfigHome()
   const workspace = join(configHome, "workspace")
   mkdirSync(workspace, { recursive: true })
@@ -170,7 +226,7 @@ test("processor treats a missing session.status entry as completed", async () =>
     assert.equal(processed, true)
 
     const item = queueManager.listItems()[0]
-    assert.equal(item.status, "completed")
+    assert.equal(item.status, "review_pending")
     assert.match(item.result, /Task finished successfully/)
   } finally {
     try {
@@ -231,7 +287,7 @@ test("processor does not complete early on a missing status before assistant out
     assert.equal(processed, true)
 
     const item = queueManager.listItems()[0]
-    assert.equal(item.status, "completed")
+    assert.equal(item.status, "review_pending")
     assert.ok(messageReads >= 2)
   } finally {
     try {
@@ -308,6 +364,295 @@ test("idle detector uses updated config from queue.json without plugin reload", 
 
     assert.equal(idleCalls, 1)
   } finally {
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("dependent items wait until the parent reaches review_pending by default", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+
+  try {
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const { QueueManager } = OpencodeQueuePlugin.__internals
+
+    const queueManager = new QueueManager()
+    const parent = await queueManager.addItem(workspace, "Parent task")
+    assert.ok("id" in parent)
+    const child = await queueManager.addItem(workspace, "Child task", { parentItemId: parent.id })
+    assert.ok("id" in child)
+
+    const first = await queueManager.getNextPending()
+    assert.equal(first?.id, parent.id)
+
+    await queueManager.updateItem(parent.id, { status: "review_pending", result: "Parent output" })
+    const second = await queueManager.getNextPending()
+    assert.equal(second?.id, child.id)
+
+    const updatedChild = queueManager.getItem(child.id)
+    assert.equal(updatedChild?.dependencySourceStatus, "review_pending")
+    assert.equal(typeof updatedChild?.dependencySatisfiedAt, "string")
+    assert.equal(updatedChild?.dependencyBlockedReason, null)
+  } finally {
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("completed dependency mode waits for explicit completion", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+
+  try {
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const { QueueManager } = OpencodeQueuePlugin.__internals
+
+    const queueManager = new QueueManager()
+    const parent = await queueManager.addItem(workspace, "Parent task")
+    assert.ok("id" in parent)
+    const child = await queueManager.addItem(workspace, "Strict child", {
+      parentItemId: parent.id,
+      dependencyMode: "completed",
+    })
+    assert.ok("id" in child)
+
+    await queueManager.updateItem(parent.id, { status: "review_pending", result: "Parent output" })
+    const nextBeforeComplete = await queueManager.getNextPending()
+    assert.equal(nextBeforeComplete, undefined)
+
+    await queueManager.updateItem(parent.id, { status: "completed", completedAt: new Date().toISOString() })
+    const nextAfterComplete = await queueManager.getNextPending()
+    assert.equal(nextAfterComplete?.id, child.id)
+    assert.equal(queueManager.getItem(child.id)?.dependencySourceStatus, "completed")
+  } finally {
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("queue-confirm marks a review item completed", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  globalThis.setInterval = () => 1
+  globalThis.clearInterval = () => {}
+
+  try {
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const hooks = await OpencodeQueuePlugin({
+      client: createMockClient(),
+      project: { id: "p1", name: "test", root: workspace, path: workspace },
+      directory: workspace,
+      worktree: workspace,
+      serverUrl: new URL("http://127.0.0.1:4096"),
+      experimental_workspace: { register() {} },
+      $: async () => ({ stdout: "", stderr: "" }),
+    })
+
+    const { QueueManager } = OpencodeQueuePlugin.__internals
+    const queueManager = new QueueManager()
+    const created = await queueManager.addItem(workspace, "Review this task")
+    assert.ok("id" in created)
+    await queueManager.updateItem(created.id, {
+      status: "review_pending",
+      result: "Looks done",
+      sessionId: "s1",
+    })
+
+    const confirmResult = await hooks.tool["queue-confirm"].execute({ itemId: created.id })
+    assert.equal(confirmResult, `Item ${created.id} marked completed.`)
+
+    const item = queueManager.getItem(created.id)
+    assert.equal(item?.status, "completed")
+    assert.equal(typeof item?.completedAt, "string")
+    assert.equal(typeof item?.reviewedAt, "string")
+  } finally {
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("queue-followup continues a review item and returns it to review", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  globalThis.setInterval = () => 1
+  globalThis.clearInterval = () => {}
+
+  try {
+    const prompts = []
+    const client = createMockClient()
+    client.session.prompt = async (payload) => {
+      prompts.push(payload)
+      return { data: { id: "m1" } }
+    }
+
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const hooks = await OpencodeQueuePlugin({
+      client,
+      project: { id: "p1", name: "test", root: workspace, path: workspace },
+      directory: workspace,
+      worktree: workspace,
+      serverUrl: new URL("http://127.0.0.1:4096"),
+      experimental_workspace: { register() {} },
+      $: async () => ({ stdout: "", stderr: "" }),
+    })
+
+    const { QueueManager } = OpencodeQueuePlugin.__internals
+    const queueManager = new QueueManager()
+    const created = await queueManager.addItem(workspace, "Needs changes")
+    assert.ok("id" in created)
+    await queueManager.updateItem(created.id, {
+      status: "review_pending",
+      result: "Initial result",
+      sessionId: "s1",
+    })
+
+    const followupResult = await hooks.tool["queue-followup"].execute({
+      itemId: created.id,
+      message: "Please tighten the final output.",
+    })
+    assert.equal(followupResult, `Follow-up sent for ${created.id}.`)
+    assert.equal(prompts.length, 1)
+    assert.equal(prompts[0].body.parts[0].text, "Please tighten the final output.")
+
+    const item = queueManager.getItem(created.id)
+    assert.equal(item?.status, "review_pending")
+    assert.match(item?.result || "", /Task finished successfully/)
+    assert.equal(item?.completedAt, null)
+    assert.equal(item?.reviewedAt, null)
+  } finally {
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("queue-followup marks descendants stale when reopening a parent", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  globalThis.setInterval = () => 1
+  globalThis.clearInterval = () => {}
+
+  try {
+    const client = createMockClient()
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const hooks = await OpencodeQueuePlugin({
+      client,
+      project: { id: "p1", name: "test", root: workspace, path: workspace },
+      directory: workspace,
+      worktree: workspace,
+      serverUrl: new URL("http://127.0.0.1:4096"),
+      experimental_workspace: { register() {} },
+      $: async () => ({ stdout: "", stderr: "" }),
+    })
+
+    const { QueueManager } = OpencodeQueuePlugin.__internals
+    const queueManager = new QueueManager()
+    const parent = await queueManager.addItem(workspace, "Parent task")
+    assert.ok("id" in parent)
+    const child = await queueManager.addItem(workspace, "Child task", { parentItemId: parent.id })
+    assert.ok("id" in child)
+
+    await queueManager.updateItem(parent.id, {
+      status: "review_pending",
+      result: "Parent output",
+      sessionId: "s1",
+    })
+    await queueManager.updateItem(child.id, {
+      status: "completed",
+      completedAt: new Date().toISOString(),
+      dependencySatisfiedAt: new Date().toISOString(),
+      dependencySourceStatus: "review_pending",
+    })
+
+    const followupResult = await hooks.tool["queue-followup"].execute({
+      itemId: parent.id,
+      message: "Please revise the parent output.",
+    })
+    assert.equal(followupResult, `Follow-up sent for ${parent.id}.`)
+
+    const updatedChild = queueManager.getItem(child.id)
+    assert.equal(updatedChild?.staleDependency, true)
+  } finally {
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("queue-remove refuses to delete a parent with dependents", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  globalThis.setInterval = () => 1
+  globalThis.clearInterval = () => {}
+
+  try {
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const hooks = await OpencodeQueuePlugin({
+      client: createMockClient(),
+      project: { id: "p1", name: "test", root: workspace, path: workspace },
+      directory: workspace,
+      worktree: workspace,
+      serverUrl: new URL("http://127.0.0.1:4096"),
+      experimental_workspace: { register() {} },
+      $: async () => ({ stdout: "", stderr: "" }),
+    })
+
+    const { QueueManager } = OpencodeQueuePlugin.__internals
+    const queueManager = new QueueManager()
+    const parent = await queueManager.addItem(workspace, "Parent task")
+    assert.ok("id" in parent)
+    const child = await queueManager.addItem(workspace, "Child task", { parentItemId: parent.id })
+    assert.ok("id" in child)
+
+    const result = await hooks.tool["queue-remove"].execute({ itemId: parent.id })
+    assert.equal(result, `Error: Item ${parent.id} has dependent tasks and cannot be removed.`)
+    assert.equal(queueManager.getItem(parent.id)?.id, parent.id)
+  } finally {
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
     try {
       const pluginModule = await loadPluginModule(configHome)
       resetPluginState(pluginModule)
@@ -505,7 +850,7 @@ test("stale processing lock can be taken over by a new processor", async () => {
     await processor.processQueue()
 
     const item = queueManager.listItems()[0]
-    assert.equal(item.status, "completed")
+    assert.equal(item.status, "review_pending")
     assert.equal(existsSync(lockPath), false)
   } finally {
     try {
