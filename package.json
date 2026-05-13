@@ -36,6 +36,7 @@
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "build:runtime": "npm run build && mkdir -p \"$HOME/.config/opencode/plugins\" && cp dist/opencode-queue.js \"$HOME/.config/opencode/plugins/opencode-queue.js\" && rm -f \"$HOME/.config/opencode/plugins/executive-assistant.js\" \"$HOME/.config/opencode/plugins/executive-assistant.impl.js\" && rm -rf \"$HOME/.config/opencode/plugin/executive-assistant\" \"$HOME/.config/opencode/plugin/opencode-queue\"",
     "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "npm test && npm run build",
     "test": "node --test test/plugin.test.mjs"
   },
   "dependencies": {

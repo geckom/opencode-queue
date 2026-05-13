@@ -58,12 +58,10 @@ Once this repo is public, OpenCode can load it from a Git dependency:
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
-    "opencode-queue@git+https://github.com/<owner>/opencode-queue.git"
+    "opencode-queue@git+https://github.com/geckom/opencode-queue.git"
   ]
 }
 ```
-
-Replace `<owner>` with the GitHub owner or org.
 
 ## GitHub Readiness
 
@@ -75,7 +73,7 @@ The repo is set up to be published publicly:
 - the package tarball is limited to `dist/`, `README.md`, and `LICENSE`
 - `npm run build:runtime` deploys a single live OpenCode plugin file at `~/.config/opencode/plugins/opencode-queue.js` and removes the legacy `executive-assistant` runtime
 
-One manual step remains before first public release: replace placeholder GitHub URLs in `package.json` after you create the real repository.
+The GitHub repository is [geckom/opencode-queue](https://github.com/geckom/opencode-queue).
 
 ## License
 

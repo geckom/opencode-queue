@@ -670,13 +670,7 @@ class BlockWatcher {
         })
       }
 
-      await this.queueManager.updateItem(item.id, {
-        status: "pending",
-        blockedReason: {
-          ...item.blockedReason,
-          userResponse: response,
-        },
-      })
+      // State transition is handled by event hooks (permission.replied / message.updated)
       return true
     } catch {
       return false
