@@ -1054,6 +1054,10 @@ function findQueueItem(queueManager: QueueManager, itemId: string): QueueItem | 
   return queueManager.getItem(itemId) || queueManager.listItems().find((item) => item.id.startsWith(itemId))
 }
 
+function findItemBySession(queueManager: QueueManager, sessionId: string): QueueItem | undefined {
+  return queueManager.listItems().find((item) => item.sessionId === sessionId)
+}
+
 function formatQueueItemSummary(item: QueueItem): string {
   let line = `[${item.status.toUpperCase()}] ${item.id.substring(0, 8)} ${item.goal.substring(0, 80)}`
   if (item.parentItemId) {
@@ -1216,22 +1220,6 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
         },
       }),
 
-      "queue-answer": tool({
-        description: "Respond to a blocked item.",
-        args: {
-          itemId: tool.schema.string().describe("Item ID or prefix"),
-          response: tool.schema.string().describe("Response text"),
-        },
-        async execute(args) {
-          const item = findQueueItem(queueManager, args.itemId)
-          if (!item) return `Error: Item ${args.itemId} not found.`
-          if (item.status !== "blocked") return `Error: Item ${item.id} is not blocked (status: ${item.status}).`
-          const success = await blockWatcher.respondToBlock(item, args.response)
-          if (success) return `Response sent for ${item.id}.`
-          return `Error: Failed to send response for item ${item.id}.`
-        },
-      }),
-
       "queue-confirm": tool({
         description: "Mark a review item complete.",
         args: {
@@ -1351,16 +1339,42 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
           case "session.updated":
           case "command.executed":
           case "tui.command.execute":
-          case "permission.replied":
           case "question.replied":
           case "question.rejected":
             idleDetector.writeActivity()
             break
+          case "permission.replied": {
+            idleDetector.writeActivity()
+            const props = event.properties as { sessionID?: string; response?: string } | undefined
+            if (props?.sessionID) {
+              const item = findItemBySession(queueManager, props.sessionID)
+              if (item?.status === "blocked" && item.blockedReason?.type === "permission") {
+                await queueManager.updateItem(item.id, {
+                  status: "running",
+                  blockedReason: { ...item.blockedReason, userResponse: props.response || "approved" },
+                })
+                const processor = new QueueProcessor(queueManager, client, idleDetector, ctx.serverUrl)
+                void processor.continueSession(item.id, props.sessionID, item.workspace)
+              }
+            }
+            break
+          }
           case "message.updated": {
             idleDetector.writeActivity()
-            const info = event.properties?.info as { sessionID?: string } | undefined
+            const info = event.properties?.info as { sessionID?: string; role?: string } | undefined
             if (info?.sessionID) {
               await greeter.onMessageUpdated(info.sessionID)
+              if (info.role === "user") {
+                const item = findItemBySession(queueManager, info.sessionID)
+                if (item?.status === "blocked" && item.blockedReason?.type === "question") {
+                  await queueManager.updateItem(item.id, {
+                    status: "running",
+                    blockedReason: { ...item.blockedReason, userResponse: "answered via session" },
+                  })
+                  const processor = new QueueProcessor(queueManager, client, idleDetector, ctx.serverUrl)
+                  void processor.continueSession(item.id, info.sessionID, item.workspace)
+                }
+              }
             }
             break
           }

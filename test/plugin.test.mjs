@@ -864,3 +864,281 @@ test("stale processing lock can be taken over by a new processor", async () => {
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
+
+test("permission.replied auto-unblocks a blocked permission item", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  globalThis.setInterval = () => 1
+  globalThis.clearInterval = () => {}
+
+  try {
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const hooks = await OpencodeQueuePlugin({
+      client: createMockClient(),
+      project: { id: "p1", name: "test", root: workspace, path: workspace },
+      directory: workspace,
+      worktree: workspace,
+      serverUrl: new URL("http://127.0.0.1:4096"),
+      experimental_workspace: { register() {} },
+      $: async () => ({ stdout: "", stderr: "" }),
+    })
+
+    const { QueueManager } = OpencodeQueuePlugin.__internals
+    const queueManager = new QueueManager()
+    const created = await queueManager.addItem(workspace, "Needs permission")
+    assert.ok("id" in created)
+    await queueManager.updateItem(created.id, {
+      status: "running",
+      sessionId: "s1",
+    })
+    const watcher = new (OpencodeQueuePlugin.__internals.BlockWatcher)(queueManager, createMockClient())
+    await watcher.handleEvent({
+      type: "permission.asked",
+      properties: { id: "perm-1", sessionID: "s1", permission: "edit files", patterns: ["src/**"] },
+    })
+
+    let item = queueManager.getItem(created.id)
+    assert.equal(item?.status, "blocked")
+    assert.equal(item?.blockedReason?.type, "permission")
+
+    await hooks.event({
+      event: {
+        type: "permission.replied",
+        properties: { sessionID: "s1", permissionID: "perm-1", response: "yes" },
+      },
+    })
+
+    await sleep(10)
+
+    item = queueManager.getItem(created.id)
+    assert.equal(item?.status, "review_pending")
+    assert.equal(item?.blockedReason?.userResponse, "yes")
+  } finally {
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("user message auto-unblocks a blocked question item", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  globalThis.setInterval = () => 1
+  globalThis.clearInterval = () => {}
+
+  try {
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const hooks = await OpencodeQueuePlugin({
+      client: createMockClient(),
+      project: { id: "p1", name: "test", root: workspace, path: workspace },
+      directory: workspace,
+      worktree: workspace,
+      serverUrl: new URL("http://127.0.0.1:4096"),
+      experimental_workspace: { register() {} },
+      $: async () => ({ stdout: "", stderr: "" }),
+    })
+
+    const { QueueManager } = OpencodeQueuePlugin.__internals
+    const queueManager = new QueueManager()
+    const created = await queueManager.addItem(workspace, "Needs answer")
+    assert.ok("id" in created)
+    await queueManager.updateItem(created.id, {
+      status: "blocked",
+      sessionId: "s1",
+      blockedReason: {
+        type: "question",
+        permissionId: null,
+        requestId: null,
+        details: "What framework?",
+        options: null,
+        userResponse: null,
+      },
+    })
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: { info: { sessionID: "s1", role: "user", id: "m1" } },
+      },
+    })
+
+    await sleep(10)
+
+    const item = queueManager.getItem(created.id)
+    assert.equal(item?.status, "review_pending")
+    assert.equal(item?.blockedReason?.userResponse, "answered via session")
+  } finally {
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("events on non-queue sessions are ignored", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  globalThis.setInterval = () => 1
+  globalThis.clearInterval = () => {}
+
+  try {
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const hooks = await OpencodeQueuePlugin({
+      client: createMockClient(),
+      project: { id: "p1", name: "test", root: workspace, path: workspace },
+      directory: workspace,
+      worktree: workspace,
+      serverUrl: new URL("http://127.0.0.1:4096"),
+      experimental_workspace: { register() {} },
+      $: async () => ({ stdout: "", stderr: "" }),
+    })
+
+    await hooks.event({
+      event: {
+        type: "permission.replied",
+        properties: { sessionID: "unknown-session", permissionID: "p1", response: "yes" },
+      },
+    })
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: { info: { sessionID: "unknown-session", role: "user", id: "m1" } },
+      },
+    })
+
+    const { QueueManager } = OpencodeQueuePlugin.__internals
+    const queueManager = new QueueManager()
+    assert.equal(queueManager.listItems().length, 0)
+  } finally {
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("events on already-running items are ignored", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  globalThis.setInterval = () => 1
+  globalThis.clearInterval = () => {}
+
+  try {
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const hooks = await OpencodeQueuePlugin({
+      client: createMockClient(),
+      project: { id: "p1", name: "test", root: workspace, path: workspace },
+      directory: workspace,
+      worktree: workspace,
+      serverUrl: new URL("http://127.0.0.1:4096"),
+      experimental_workspace: { register() {} },
+      $: async () => ({ stdout: "", stderr: "" }),
+    })
+
+    const { QueueManager } = OpencodeQueuePlugin.__internals
+    const queueManager = new QueueManager()
+    const created = await queueManager.addItem(workspace, "Running task")
+    assert.ok("id" in created)
+    await queueManager.updateItem(created.id, {
+      status: "running",
+      sessionId: "s1",
+    })
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: { info: { sessionID: "s1", role: "user", id: "m1" } },
+      },
+    })
+
+    const item = queueManager.getItem(created.id)
+    assert.equal(item?.status, "running")
+  } finally {
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
+
+test("permission.replied on review_pending item is ignored", async () => {
+  const configHome = createTempConfigHome()
+  const workspace = join(configHome, "workspace")
+  mkdirSync(workspace, { recursive: true })
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  globalThis.setInterval = () => 1
+  globalThis.clearInterval = () => {}
+
+  try {
+    const pluginModule = await loadPluginModule(configHome)
+    const { default: OpencodeQueuePlugin } = pluginModule
+    const hooks = await OpencodeQueuePlugin({
+      client: createMockClient(),
+      project: { id: "p1", name: "test", root: workspace, path: workspace },
+      directory: workspace,
+      worktree: workspace,
+      serverUrl: new URL("http://127.0.0.1:4096"),
+      experimental_workspace: { register() {} },
+      $: async () => ({ stdout: "", stderr: "" }),
+    })
+
+    const { QueueManager } = OpencodeQueuePlugin.__internals
+    const queueManager = new QueueManager()
+    const created = await queueManager.addItem(workspace, "Review task")
+    assert.ok("id" in created)
+    await queueManager.updateItem(created.id, {
+      status: "review_pending",
+      sessionId: "s1",
+      result: "Done",
+    })
+
+    await hooks.event({
+      event: {
+        type: "permission.replied",
+        properties: { sessionID: "s1", permissionID: "perm-1", response: "yes" },
+      },
+    })
+
+    const item = queueManager.getItem(created.id)
+    assert.equal(item?.status, "review_pending")
+  } finally {
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
+    try {
+      const pluginModule = await loadPluginModule(configHome)
+      resetPluginState(pluginModule)
+    } catch {}
+    rmSync(configHome, { recursive: true, force: true })
+  }
+})
