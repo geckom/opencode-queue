@@ -1,58 +1,36 @@
 # opencode-queue
 
-`opencode-queue` is an OpenCode plugin that keeps a global task queue in `~/.config/opencode/queue.json` and processes queued work when OpenCode is idle.
+An [OpenCode](https://opencode.ai) plugin that maintains a global task queue and processes queued work when OpenCode is idle.
 
-This repo is the source of truth for the plugin formerly developed under the working name `ExecutiveAssistant`.
+## How it works
 
-## What It Does
+The plugin stores a shared queue in `~/.config/opencode/queue.json`. When OpenCode is idle, it picks the next pending item, creates a session for it, and monitors progress. Blocked items (permission requests, questions) stay in the queue until resolved. Completed work enters a review state before final close-out.
 
-- adds queue management tools such as `queue-add`, `queue-list`, `queue-confirm`, `queue-followup`, `queue-remove`, and `queue-retry`
-- stores queue state in a shared JSON file
-- watches global activity through `queue.last-activity`
-- processes one queued item at a time when OpenCode becomes idle
-- keeps blocked and failed work in the queue for later action
-- routes finished work through human review before final completion
-- supports parent-child task dependencies, defaulting to parent review readiness
+### Features
 
-## Repo Layout
+- **Queue management tools** — add, list, confirm, follow up, remove, and retry items
+- **Idle processing** — automatically starts the next queued task when OpenCode is idle
+- **Permission and question handling** — detects blocked sessions and auto-resumes when you respond through any opencode interface
+- **Review gate** — finished work enters `review_pending` state for human sign-off before marking complete
+- **Task dependencies** — parent-child relationships with configurable dependency modes
+- **Retry with backoff** — failed items retry automatically with increasing delays
+- **Blocked reminders** — periodically nudges when a queue item is waiting for a response
+- **Hot-reload config** — change queue settings without restarting OpenCode
 
-- `src/opencode-queue.ts`: plugin implementation
-- `test/plugin.test.mjs`: plugin tests against compiled output
+## Tools
 
-## Local Development
+| Tool | Description |
+|------|-------------|
+| `queue-add` | Add a task to the queue |
+| `queue-list` | List queue items, with optional status filter and view modes |
+| `queue-confirm` | Mark a `review_pending` item as complete |
+| `queue-followup` | Send a follow-up message on a `review_pending` item |
+| `queue-remove` | Remove a queue item |
+| `queue-retry` | Retry a failed item |
 
-```bash
-npm install
-npm run build
-npm test
-```
+## Installation
 
-To deploy the local build into your OpenCode config:
-
-```bash
-npm run build:runtime
-```
-
-That writes:
-
-- `~/.config/opencode/plugins/opencode-queue.js`
-
-## Publish Checklist
-
-Before publishing:
-
-1. Run `npm test`
-2. Run `npm run build`
-3. Run `npm run pack:check`
-4. Run `npm run build:runtime`
-5. Smoke test with `opencode --print-logs debug config`
-6. Create the public GitHub repo named `opencode-queue`
-7. Update `package.json` `repository`, `bugs`, and `homepage` fields to point at that repo
-8. Push the repo and verify GitHub Actions passes
-
-## Install From GitHub
-
-Once this repo is public, OpenCode can load it from a Git dependency:
+Add to your `opencode.json`:
 
 ```json
 {
@@ -63,17 +41,31 @@ Once this repo is public, OpenCode can load it from a Git dependency:
 }
 ```
 
-## GitHub Readiness
+## Configuration
 
-The repo is set up to be published publicly:
+The queue reads its settings from `~/.config/opencode/queue.json`. Edit the `config` object there — changes apply immediately without restarting OpenCode.
 
-- package name is `opencode-queue`
-- license is MIT
-- CI should run on pushes and pull requests
-- the package tarball is limited to `dist/`, `README.md`, and `LICENSE`
-- `npm run build:runtime` deploys a single live OpenCode plugin file at `~/.config/opencode/plugins/opencode-queue.js` and removes the legacy `executive-assistant` runtime
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `idleTimeoutSeconds` | `3600` | Seconds of inactivity before the next item is processed |
+| `blockedReminderMinutes` | `30` | Minutes between reminders for blocked items |
+| `maxRetries` | `3` | Maximum retry attempts for failed items |
+| `retryDelaysMinutes` | `[5, 10, 15]` | Delay in minutes before each retry attempt |
+| `reminderIntervalMessages` | `30` | Messages between blocked-item reminders |
 
-The GitHub repository is [geckom/opencode-queue](https://github.com/geckom/opencode-queue).
+## Development
+
+```bash
+npm install
+npm run build
+npm test
+```
+
+To deploy into your local OpenCode config:
+
+```bash
+npm run build:runtime
+```
 
 ## License
 
