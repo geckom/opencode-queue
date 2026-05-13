@@ -1,5 +1,7 @@
 # opencode-queue
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Support-Buy%20Me%20A%20Coffee-yellow?logo=buymeacoffee)](https://buymeacoffee.com/geckom)
+
 An [OpenCode](https://opencode.ai) plugin that maintains a global task queue and processes queued work when OpenCode is idle.
 
 ## How it works
