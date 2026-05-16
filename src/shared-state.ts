@@ -5,6 +5,7 @@ import { IdleDetector } from "./idle-detector.js"
 import { QueueProcessor } from "./queue-processor.js"
 import { QueueManager } from "./queue-manager.js"
 import { ScheduleManager } from "./schedule-manager.js"
+import { SessionGreeter } from "./session-greeter.js"
 
 const SHARED_STATE_KEY = Symbol.for("opencode.queue.shared-state")
 
@@ -12,6 +13,7 @@ export interface SharedState {
   queueManager: QueueManager
   idleDetector: IdleDetector
   scheduleManager: ScheduleManager
+  sessionGreeter: SessionGreeter
   coordinatorClaimed: boolean
   initialized: Promise<void>
   cleanupHandlers: Array<{
@@ -28,11 +30,13 @@ export function createSharedState(client: OpencodeClient, serverUrl: URL): Share
     await processor.processQueue()
   })
   const scheduleManager = new ScheduleManager(queueManager)
+  const sessionGreeter = new SessionGreeter(() => queueManager.getConfig(), queueManager, client)
 
   return {
     queueManager,
     idleDetector,
     scheduleManager,
+    sessionGreeter,
     coordinatorClaimed: false,
     initialized: queueManager.resetRunningToPending(),
     cleanupHandlers: [],
@@ -45,6 +49,7 @@ export function cleanupSharedState(shared: SharedState): void {
   shared.cleanedUp = true
   shared.scheduleManager.stop()
   shared.idleDetector.stop()
+  shared.sessionGreeter.stop()
   FileLock.release(LOCK_FILE)
 }
 

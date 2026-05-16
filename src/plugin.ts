@@ -4,10 +4,8 @@ import { existsSync, statSync } from "fs"
 import { resolve } from "path"
 import { BlockWatcher } from "./block-watcher.js"
 import { formatQueueItemFull, formatQueueItemLog, formatQueueItemSummary, formatScheduledTask } from "./formatters.js"
-import { IdleDetector } from "./idle-detector.js"
 import { QueueProcessor } from "./queue-processor.js"
 import { QueueManager } from "./queue-manager.js"
-import { SessionGreeter } from "./session-greeter.js"
 import { getSharedState } from "./shared-state.js"
 import { safeToast } from "./toast.js"
 import type { QueueItem } from "./types.js"
@@ -29,7 +27,7 @@ export const OpencodeQueuePlugin: Plugin = async (ctx) => {
   const shared = getSharedState(client, ctx.serverUrl)
   await shared.initialized
   shared.cleanedUp = false
-  const { queueManager, idleDetector } = shared
+  const { queueManager, idleDetector, sessionGreeter: greeter } = shared
   const isCoordinator = !shared.coordinatorClaimed
   if (isCoordinator) {
     shared.coordinatorClaimed = true
@@ -37,9 +35,8 @@ export const OpencodeQueuePlugin: Plugin = async (ctx) => {
     registerProcessCleanup(shared)
     idleDetector.start()
     shared.scheduleManager.start()
+    greeter.startBlockedReminders()
   }
-
-  const greeter = new SessionGreeter(() => queueManager.getConfig(), queueManager, client)
   const blockWatcher = new BlockWatcher(queueManager, client)
 
   if (isCoordinator) {

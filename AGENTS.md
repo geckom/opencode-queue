@@ -80,7 +80,7 @@ Runtime state files (all in `~/.config/opencode/`):
 
 ### Scheduled tasks
 
-Scheduled tasks use the `cron` library (kelektiv/node-cron v3). Only the coordinator process runs CronJob instances. On startup, `ScheduleManager.start()` restores all enabled schedules. One-off tasks with past `scheduledFor` dates fire immediately. Scheduled items are prepended to the queue (front of array) so they are processed before manually-added items.
+Scheduled tasks use the `cron` library (`cron@4.x`). Only the coordinator process runs CronJob instances. On startup, `ScheduleManager.start()` restores all enabled schedules. One-off tasks with past `scheduledFor` dates fire immediately. Scheduled items are prepended to the queue (front of array) so they are processed before manually-added items.
 
 ## Required Workflow
 

@@ -70,6 +70,37 @@ test("recurring schedule generates items and updates occurrence count", async ()
   })
 })
 
+test("max-occurrence disable clears nextTriggerAt", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const { testingModule } = await loadBuiltModules(configHome)
+    const { QueueManager, ScheduleManager } = testingModule
+
+    const queueManager = new QueueManager()
+    const scheduleManager = new ScheduleManager(queueManager)
+
+    const task = await scheduleManager.addAndStart({
+      workspace,
+      goal: "Disable cleanly",
+      scheduledFor: null,
+      cronExpression: "* * * * * *",
+      timezone: "UTC",
+      enabled: true,
+      maxOccurrences: 1,
+      parentItemId: null,
+      dependencyMode: "review_pending",
+    })
+
+    await sleep(1500)
+
+    const updated = queueManager.getSchedule(task.id)
+    assert.equal(updated.enabled, false)
+    assert.equal(updated.occurrenceCount, 1)
+    assert.equal(updated.nextTriggerAt, null)
+
+    scheduleManager.stop()
+  })
+})
+
 test("startup recovery restores enabled schedules", async () => {
   await withTempRepo(async ({ configHome, workspace }) => {
     const { testingModule } = await loadBuiltModules(configHome)

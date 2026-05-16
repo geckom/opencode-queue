@@ -28,9 +28,10 @@ The plugin stores a shared queue in `~/.config/opencode/queue.json`. When OpenCo
 - **Review gate** — finished work enters `review_pending` state for human sign-off before marking complete
 - **Task dependencies** — parent-child relationships with configurable dependency modes
 - **Retry with backoff** — failed items retry automatically with increasing delays
-- **Blocked reminders** — periodically nudges when a queue item is waiting for a response
+- **Blocked reminders** — time-based reminder toasts for blocked queue items
 - **Scheduled tasks** — one-off (run once at a specific time) or recurring (cron-based) scheduled items that automatically prepend to the front of the queue
 - **Schedule management** — pause, resume, and remove scheduled tasks; automatic auto-disable after a configurable number of occurrences
+- **Corruption-safe queue store handling** — preserves broken `queue.json` contents for recovery instead of silently resetting state
 - **Hot-reload config** — change queue settings without restarting OpenCode
 
 ## Tools
@@ -72,6 +73,8 @@ The queue reads its settings from `~/.config/opencode/queue.json`. Edit the `con
 | `reminderIntervalMessages` | `30` | Messages between blocked-item reminders |
 
 ## Development
+
+Local tests use compiled output from `dist/`, including an internal test surface for the repo test suite. That test-only surface is not exported or published as part of the package contract.
 
 ```bash
 npm install

@@ -5,6 +5,8 @@ import { safeToast } from "./toast.js"
 
 export class SessionGreeter {
   private messageCounts: Map<string, number> = new Map()
+  private blockedReminderTimer: ReturnType<typeof setInterval> | null = null
+  private lastBlockedReminderAt = 0
   private getConfig: () => QueueConfig
   private queueManager: QueueManager
   private client: OpencodeClient
@@ -19,6 +21,21 @@ export class SessionGreeter {
     this.showToast()
   }
 
+  startBlockedReminders(): void {
+    if (this.blockedReminderTimer) return
+    this.blockedReminderTimer = setInterval(() => {
+      void this.checkBlockedReminder()
+    }, 60_000)
+    this.blockedReminderTimer.unref?.()
+  }
+
+  stop(): void {
+    if (this.blockedReminderTimer) {
+      clearInterval(this.blockedReminderTimer)
+      this.blockedReminderTimer = null
+    }
+  }
+
   async onMessageUpdated(sessionId: string): Promise<void> {
     const count = (this.messageCounts.get(sessionId) || 0) + 1
     this.messageCounts.set(sessionId, count)
@@ -26,6 +43,28 @@ export class SessionGreeter {
       this.messageCounts.set(sessionId, 0)
       this.showToast()
     }
+  }
+
+  async checkBlockedReminder(): Promise<void> {
+    const blockedItems = this.queueManager.listItems("blocked")
+    if (blockedItems.length === 0) {
+      this.lastBlockedReminderAt = 0
+      return
+    }
+
+    const intervalMs = this.getConfig().blockedReminderMinutes * 60 * 1000
+    if (intervalMs > 0 && Date.now() - this.lastBlockedReminderAt < intervalMs) {
+      return
+    }
+
+    const first = blockedItems[0]
+    const summary = first.blockedReason?.details || first.goal
+    this.lastBlockedReminderAt = Date.now()
+    safeToast(
+      this.client,
+      `Queue blocked: ${blockedItems.length} item${blockedItems.length === 1 ? "" : "s"} waiting. ${summary.substring(0, 120)}`,
+      "warning",
+    )
   }
 
   private showToast(): void {

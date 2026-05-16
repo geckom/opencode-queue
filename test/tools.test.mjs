@@ -2,7 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { createPluginHooks, createMockClient, loadBuiltModules, withTempRepo } from "./helpers.mjs"
+import { createPluginHooks, createMockClient, loadBuiltModules, sleep, withTempRepo } from "./helpers.mjs"
 
 test("queue tools work from the built plugin", async () => {
   await withTempRepo(async ({ configHome, workspace }) => {
@@ -164,7 +164,7 @@ test("repeated plugin loads share a single coordinator timer and only one event 
       const firstHooks = await pluginModule.default(context)
       const secondHooks = await pluginModule.default(context)
 
-      assert.equal(timerStarts, 1)
+      assert.equal(timerStarts, 2)
       assert.equal(typeof firstHooks.event, "function")
       assert.equal(secondHooks.event, undefined)
       assert.equal(typeof firstHooks["tool.execute.before"], "function")
@@ -172,6 +172,54 @@ test("repeated plugin loads share a single coordinator timer and only one event 
     } finally {
       globalThis.setInterval = originalSetInterval
       globalThis.clearInterval = originalClearInterval
+    }
+  })
+})
+
+test("blocked reminder setting produces warning toasts for blocked items", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const toasts = []
+    const client = createMockClient()
+    client.tui.showToast = async ({ body }) => {
+      toasts.push(body)
+      return { data: true }
+    }
+
+    const { testingModule, restoreTimers } = await createPluginHooks({
+      configHome,
+      workspace,
+      client,
+      stubTimers: true,
+    })
+    const { QueueManager, SessionGreeter } = testingModule
+
+    try {
+      const queueManager = new QueueManager()
+      await queueManager.updateConfig({ blockedReminderMinutes: 0 })
+      const created = await queueManager.addItem(workspace, "Needs answer")
+      assert.ok("id" in created)
+      await queueManager.updateItem(created.id, {
+        status: "blocked",
+        blockedReason: {
+          type: "question",
+          permissionId: null,
+          requestId: null,
+          details: "What framework?",
+          options: null,
+          userResponse: null,
+        },
+      })
+
+      const greeter = new SessionGreeter(() => queueManager.getConfig(), queueManager, client)
+      await greeter.checkBlockedReminder()
+      await sleep(1)
+
+      assert.ok(
+        toasts.some((toast) => typeof toast.message === "string" && toast.message.includes("Queue blocked: 1 item")),
+      )
+      greeter.stop()
+    } finally {
+      restoreTimers?.()
     }
   })
 })

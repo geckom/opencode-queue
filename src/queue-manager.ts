@@ -1,7 +1,16 @@
 import { randomUUID } from "crypto"
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "fs"
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs"
 import { resolve } from "path"
-import { DEFAULT_CONFIG, OPENCODE_DIR, QUEUE_FILE, STORE_LOCK_FILE, STORE_LOCK_RETRY_MS, STORE_LOCK_STALE_MS, STORE_LOCK_WAIT_MS } from "./constants.js"
+import {
+  DEFAULT_CONFIG,
+  OPENCODE_DIR,
+  QUEUE_CORRUPTION_MARKER_FILE,
+  QUEUE_FILE,
+  STORE_LOCK_FILE,
+  STORE_LOCK_RETRY_MS,
+  STORE_LOCK_STALE_MS,
+  STORE_LOCK_WAIT_MS,
+} from "./constants.js"
 import { FileLock } from "./file-lock.js"
 import type { DependencyMode, DependencySourceStatus, QueueConfig, QueueItem, QueueStore, ScheduledTask } from "./types.js"
 import { createQueueItemFromSchedule } from "./utils.js"
@@ -11,6 +20,52 @@ import { createQueueItemFromSchedule } from "./utils.js"
  * transitions that must be serialized across processes.
  */
 export class QueueManager {
+  private clearCorruptionMarker(): void {
+    try {
+      if (existsSync(QUEUE_CORRUPTION_MARKER_FILE)) {
+        unlinkSync(QUEUE_CORRUPTION_MARKER_FILE)
+      }
+    } catch {}
+  }
+
+  private handleCorruptedStore(error: unknown): never {
+    if (!existsSync(OPENCODE_DIR)) {
+      mkdirSync(OPENCODE_DIR, { recursive: true })
+    }
+
+    let backupPath: string | null = null
+    try {
+      if (existsSync(QUEUE_CORRUPTION_MARKER_FILE)) {
+        const marker = JSON.parse(readFileSync(QUEUE_CORRUPTION_MARKER_FILE, "utf-8")) as { backupPath?: string }
+        if (typeof marker.backupPath === "string") {
+          backupPath = marker.backupPath
+        }
+      }
+    } catch {}
+
+    if (!backupPath) {
+      backupPath = `${QUEUE_FILE}.corrupt-${Date.now()}`
+      copyFileSync(QUEUE_FILE, backupPath)
+      writeFileSync(
+        QUEUE_CORRUPTION_MARKER_FILE,
+        JSON.stringify(
+          {
+            detectedAt: new Date().toISOString(),
+            backupPath,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      )
+    }
+
+    throw new Error(
+      `Queue store is corrupted: ${QUEUE_FILE}. Backup preserved at ${backupPath}. Repair or replace queue.json before continuing.`,
+    )
+  }
+
   private normalizeItem(item: Partial<QueueItem>): QueueItem {
     return {
       id: String(item.id || randomUUID()),
@@ -68,19 +123,22 @@ export class QueueManager {
   }
 
   private readStore(): QueueStore {
+    if (!existsSync(QUEUE_FILE)) {
+      this.clearCorruptionMarker()
+      return { config: { ...DEFAULT_CONFIG }, items: [], schedules: [] }
+    }
+
     try {
-      if (!existsSync(QUEUE_FILE)) {
-        return { config: { ...DEFAULT_CONFIG }, items: [], schedules: [] }
-      }
       const raw = readFileSync(QUEUE_FILE, "utf-8")
       const parsed = JSON.parse(raw) as Partial<QueueStore>
+      this.clearCorruptionMarker()
       return {
         config: this.normalizeConfig(parsed.config),
         items: Array.isArray(parsed.items) ? parsed.items.map((item) => this.normalizeItem(item)) : [],
         schedules: Array.isArray(parsed.schedules) ? parsed.schedules.map((schedule) => this.normalizeSchedule(schedule)) : [],
       }
-    } catch {
-      return { config: { ...DEFAULT_CONFIG }, items: [], schedules: [] }
+    } catch (error) {
+      this.handleCorruptedStore(error)
     }
   }
 

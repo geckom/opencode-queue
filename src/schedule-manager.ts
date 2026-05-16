@@ -61,7 +61,7 @@ export class ScheduleManager {
     const result = await this.queueManager.triggerSchedule(scheduleId)
     if (!result) return
 
-    if (result.schedule.cronExpression) {
+    if (result.schedule.cronExpression && result.schedule.enabled) {
       try {
         const next = new CronJob(result.schedule.cronExpression, () => {}, undefined, true, result.schedule.timezone)
         const nextDate = next.nextDate()
@@ -72,6 +72,8 @@ export class ScheduleManager {
       } catch {
         await this.queueManager.updateSchedule(scheduleId, { nextTriggerAt: null })
       }
+    } else if (!result.schedule.enabled) {
+      await this.queueManager.updateSchedule(scheduleId, { nextTriggerAt: null })
     }
 
     if (!result.schedule.enabled && this.jobs.has(scheduleId)) {
@@ -118,12 +120,30 @@ export class ScheduleManager {
       job.stop()
       this.jobs.delete(id)
     }
-    return this.queueManager.updateSchedule(id, { enabled: false })
+    return this.queueManager.updateSchedule(id, { enabled: false, nextTriggerAt: null })
   }
 
   async resume(id: string): Promise<ScheduledTask | undefined> {
     const updated = await this.queueManager.updateSchedule(id, { enabled: true })
-    if (updated) this.startJob(updated)
-    return updated
+    if (!updated) return updated
+
+    if (updated.cronExpression) {
+      try {
+        const job = new CronJob(updated.cronExpression, () => {}, undefined, true, updated.timezone)
+        const nextDate = job.nextDate()
+        job.stop()
+        await this.queueManager.updateSchedule(updated.id, {
+          nextTriggerAt: nextDate ? nextDate.toISO() : null,
+        })
+      } catch {
+        await this.queueManager.updateSchedule(updated.id, { nextTriggerAt: null })
+      }
+    } else if (updated.scheduledFor) {
+      await this.queueManager.updateSchedule(updated.id, { nextTriggerAt: updated.scheduledFor })
+    }
+
+    const resumed = this.queueManager.getSchedule(updated.id)
+    if (resumed) this.startJob(resumed)
+    return resumed
   }
 }

@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import {
   createMockClient,
@@ -142,5 +142,32 @@ test("stale processing lock can be taken over by a new processor", async () => {
 
     const item = queueManager.listItems()[0]
     assert.equal(item.status, "review_pending")
+  })
+})
+
+test("corrupted queue store is preserved and mutation is refused", async () => {
+  await withTempRepo(async ({ configHome }) => {
+    const { testingModule } = await loadBuiltModules(configHome)
+    const { QueueManager, QUEUE_CORRUPTION_MARKER_FILE, QUEUE_FILE } = testingModule
+
+    const opencodeDir = join(configHome, "opencode")
+    mkdirSync(opencodeDir, { recursive: true })
+    const queuePath = QUEUE_FILE
+    const queueManager = new QueueManager()
+    await queueManager.updateConfig({ idleTimeoutSeconds: 3600 })
+    assert.equal(existsSync(queuePath), true)
+    writeFileSync(queuePath, "{not json", "utf8")
+
+    await assert.rejects(
+      queueManager.updateConfig({ idleTimeoutSeconds: 42 }),
+      /Queue store is corrupted/,
+    )
+
+    const markerPath = QUEUE_CORRUPTION_MARKER_FILE
+    assert.equal(existsSync(markerPath), true)
+    const marker = JSON.parse(readFileSync(markerPath, "utf8"))
+    assert.equal(typeof marker.backupPath, "string")
+    assert.equal(existsSync(marker.backupPath), true)
+    assert.equal(readFileSync(queuePath, "utf8"), "{not json")
   })
 })

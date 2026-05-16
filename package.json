@@ -22,13 +22,11 @@
   "exports": {
     ".": {
       "import": "./dist/opencode-queue.js"
-    },
-    "./testing": {
-      "import": "./dist/testing.js"
     }
   },
   "files": [
-    "dist",
+    "dist/*.js",
+    "!dist/testing.js",
     "README.md",
     "LICENSE"
   ],
