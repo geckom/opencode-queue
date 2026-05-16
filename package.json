@@ -4,6 +4,9 @@
   "description": "OpenCode plugin that maintains a global task queue and processes queued work when OpenCode is idle.",
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "main": "./dist/opencode-queue.js",
   "publishConfig": {
     "access": "public"
@@ -19,6 +22,9 @@
   "exports": {
     ".": {
       "import": "./dist/opencode-queue.js"
+    },
+    "./testing": {
+      "import": "./dist/testing.js"
     }
   },
   "files": [
@@ -38,15 +44,15 @@
     "build:runtime": "npm run build && npm run bundle && mkdir -p \"$HOME/.config/opencode/plugins\" && cp dist/opencode-queue.bundled.js \"$HOME/.config/opencode/plugins/opencode-queue.js\" && rm -f \"$HOME/.config/opencode/plugins/executive-assistant.js\" \"$HOME/.config/opencode/plugins/executive-assistant.impl.js\" && rm -rf \"$HOME/.config/opencode/plugin/executive-assistant\" \"$HOME/.config/opencode/plugin/opencode-queue\"",
     "pack:check": "npm pack --dry-run",
     "prepublishOnly": "npm test && npm run build",
-    "test": "node --test test/plugin.test.mjs"
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.14.46",
-    "@opencode-ai/sdk": "1.14.46",
+    "@opencode-ai/plugin": "1.15.0",
+    "@opencode-ai/sdk": "1.15.0",
     "cron": "^4.4.0"
   },
   "devDependencies": {
-    "@types/node": "^24.10.0",
+    "@types/node": "^24.12.4",
     "esbuild": "^0.28.0",
     "typescript": "^5.9.3"
   }

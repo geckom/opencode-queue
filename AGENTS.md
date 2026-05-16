@@ -10,15 +10,16 @@ Do not treat `~/.config/opencode` as the primary development location. Runtime a
 
 ## Project Layout
 
-- `src/opencode-queue.ts` — single source file containing the entire plugin
-- `test/plugin.test.mjs` — tests running against compiled output
+- `src/` — modular TypeScript source; `src/opencode-queue.ts` is the compatibility entrypoint and `src/plugin.ts` contains hook/tool wiring
+- `src/testing.ts` — dedicated test-only export surface for compiled-output tests
+- `test/*.test.mjs` — tests running against compiled output, with shared helpers in `test/helpers.mjs`
 - `opencode.jsonc` — local project config for developing this repo inside opencode
 - `.github/workflows/ci.yml` — CI: build, test, pack check
 - `dist/` — compiled output (gitignored, rebuilt by `npm run build`)
 
 ## Architecture
 
-Everything lives in `src/opencode-queue.ts`. The main classes are:
+The plugin is intentionally modular in source, but still deployed as a single bundled runtime file for OpenCode. The main classes are:
 
 - **QueueManager** — reads/writes `~/.config/opencode/queue.json`, handles locking, CRUD operations on queue items and scheduled tasks
 - **IdleDetector** — watches `~/.config/opencode/queue.last-activity`, triggers processing when OpenCode goes idle
@@ -30,7 +31,7 @@ Everything lives in `src/opencode-queue.ts`. The main classes are:
 
 ### Plugin entry point
 
-`OpencodeQueuePlugin()` is the default export. It registers:
+`OpencodeQueuePlugin()` is the default export. `src/opencode-queue.ts` is the package/runtime entry shim that re-exports the plugin. The plugin registers:
 
 - **8 tools**: `queue-list`, `queue-add`, `queue-confirm`, `queue-followup`, `queue-remove`, `queue-retry`, `queue-schedule-add`, `queue-schedule-list`
 - **Activity hooks**: `chat.message`, `tool.execute.before`, `tool.execute.after` — refresh idle timer
@@ -94,7 +95,7 @@ Do not hand-edit deployed files in `~/.config/opencode/plugins/` unless you are 
 
 ## Guardrails
 
-- Keep the runtime plugin module export shape minimal. OpenCode treats function exports as plugin entrypoints, so the deployed module should expose only the default plugin export.
+- Keep the runtime plugin module export shape minimal. OpenCode treats function exports as plugin entrypoints, so the deployed bundle should expose only the default plugin export. Use `src/testing.ts` for test-only exports instead of hanging internals off the runtime export.
 - Prefer non-blocking startup behavior. Timers must not keep short-lived OpenCode commands alive.
 - Toasts are best-effort only. They must not block plugin startup.
 - Tests run against compiled output (`dist/`), not TypeScript source. Always `npm run build` before `npm test`.

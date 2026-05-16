@@ -4,6 +4,18 @@
 
 An [OpenCode](https://opencode.ai) plugin that maintains a global task queue and processes queued work when OpenCode is idle.
 
+## Architecture
+
+The source is split into focused modules under `src/`, while the runtime deploy still ends up as a single bundled plugin file for OpenCode.
+
+- `src/plugin.ts` wires hooks and tools
+- `src/queue-manager.ts` owns `queue.json` persistence and serialized state transitions
+- `src/queue-processor.ts` runs the queue/session state machine
+- `src/schedule-manager.ts` owns cron jobs and delegates persisted mutations back to `QueueManager`
+- `src/testing.ts` exposes a test-only surface used by compiled-output tests
+
+For the local development/runtime flow, see [docs/architecture.md](docs/architecture.md).
+
 ## How it works
 
 The plugin stores a shared queue in `~/.config/opencode/queue.json`. When OpenCode is idle, it picks the next pending item, creates a session for it, and monitors progress. Blocked items (permission requests, questions) stay in the queue until resolved. Completed work enters a review state before final close-out.
@@ -71,6 +83,12 @@ To deploy into your local OpenCode config:
 
 ```bash
 npm run build:runtime
+```
+
+Smoke test the deployed plugin with:
+
+```bash
+opencode --print-logs debug config
 ```
 
 ## License

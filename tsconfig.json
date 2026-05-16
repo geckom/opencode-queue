@@ -6,7 +6,10 @@
     "outDir": "dist",
     "rootDir": "src",
     "strict": true,
+    "noEmitOnError": true,
     "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "verbatimModuleSyntax": true,
     "types": ["node"]
   },
   "include": ["src/**/*.ts"]
