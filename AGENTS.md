@@ -20,18 +20,19 @@ Do not treat `~/.config/opencode` as the primary development location. Runtime a
 
 Everything lives in `src/opencode-queue.ts`. The main classes are:
 
-- **QueueManager** — reads/writes `~/.config/opencode/queue.json`, handles locking, CRUD operations on queue items
+- **QueueManager** — reads/writes `~/.config/opencode/queue.json`, handles locking, CRUD operations on queue items and scheduled tasks
 - **IdleDetector** — watches `~/.config/opencode/queue.last-activity`, triggers processing when OpenCode goes idle
 - **FileLock** — file-based locking for the processing lock and store lock
 - **BlockWatcher** — detects blocked sessions (permission requests, questions) and auto-resumes via `permission.replied` / `message.updated` event hooks
 - **QueueProcessor** — picks the next pending item, starts a session, monitors progress, handles retry/failure
 - **SessionGreeter** — sends an initial prompt to new queue sessions
+- **ScheduleManager** — manages CronJob instances for one-off and recurring scheduled tasks; creates queue items when schedules fire
 
 ### Plugin entry point
 
 `OpencodeQueuePlugin()` is the default export. It registers:
 
-- **6 tools**: `queue-list`, `queue-add`, `queue-confirm`, `queue-followup`, `queue-remove`, `queue-retry`
+- **8 tools**: `queue-list`, `queue-add`, `queue-confirm`, `queue-followup`, `queue-remove`, `queue-retry`, `queue-schedule-add`, `queue-schedule-list`
 - **Activity hooks**: `chat.message`, `tool.execute.before`, `tool.execute.after` — refresh idle timer
 - **Event hooks**: `session.created`, `session.updated`, `command.executed`, `tui.command.execute`, `question.replied`, `question.rejected` — activity signals; `permission.replied` — auto-unblocks permission-blocked items; `message.updated` — auto-unblocks question-blocked items; `session.idle` — no-op
 
@@ -45,13 +46,15 @@ pending → running → review_pending → completed
                   → failed → pending (retry)
 ```
 
+Scheduled tasks (`ScheduledTask`) are templates that generate queue items. They are stored in `queue.json` alongside items but are separate objects. When a schedule fires, it creates a `pending` queue item at the front of the queue with `sourceScheduleId` linking back to the schedule. One-off tasks auto-disable after firing; recurring tasks fire on a cron expression until paused or `maxOccurrences` is reached.
+
 ### Coordinator pattern
 
 Only one opencode process acts as coordinator at a time, claimed via a file-based processing lock. Non-coordinator processes still register activity hooks so the shared idle timer stays fresh.
 
 ### Config
 
-Queue config lives in `~/.config/opencode/queue.json` under the `config` key. Changes are hot-reloaded without restarting opencode. Defaults:
+Queue config lives in `~/.config/opencode/queue.json` under the `config` key. The file also contains `items` (queue items) and `schedules` (scheduled tasks). Changes are hot-reloaded without restarting opencode. Defaults:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -69,10 +72,14 @@ The live global plugin is deployed to:
 
 Runtime state files (all in `~/.config/opencode/`):
 
-- `queue.json` — queue items and config
+- `queue.json` — queue items, scheduled tasks, and config
 - `queue.last-activity` — timestamp of last activity
 - `queue.lock` — processing lock (stale after 120s)
 - `queue.store.lock` — store lock for concurrent reads/writes (stale after 15s)
+
+### Scheduled tasks
+
+Scheduled tasks use the `cron` library (kelektiv/node-cron v3). Only the coordinator process runs CronJob instances. On startup, `ScheduleManager.start()` restores all enabled schedules. One-off tasks with past `scheduledFor` dates fire immediately. Scheduled items are prepended to the queue (front of array) so they are processed before manually-added items.
 
 ## Required Workflow
 

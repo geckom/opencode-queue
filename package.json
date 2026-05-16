@@ -34,17 +34,20 @@
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.json",
-    "build:runtime": "npm run build && mkdir -p \"$HOME/.config/opencode/plugins\" && cp dist/opencode-queue.js \"$HOME/.config/opencode/plugins/opencode-queue.js\" && rm -f \"$HOME/.config/opencode/plugins/executive-assistant.js\" \"$HOME/.config/opencode/plugins/executive-assistant.impl.js\" && rm -rf \"$HOME/.config/opencode/plugin/executive-assistant\" \"$HOME/.config/opencode/plugin/opencode-queue\"",
+    "bundle": "esbuild src/opencode-queue.ts --bundle --platform=node --format=esm --external:@opencode-ai/* --outfile=dist/opencode-queue.bundled.js",
+    "build:runtime": "npm run build && npm run bundle && mkdir -p \"$HOME/.config/opencode/plugins\" && cp dist/opencode-queue.bundled.js \"$HOME/.config/opencode/plugins/opencode-queue.js\" && rm -f \"$HOME/.config/opencode/plugins/executive-assistant.js\" \"$HOME/.config/opencode/plugins/executive-assistant.impl.js\" && rm -rf \"$HOME/.config/opencode/plugin/executive-assistant\" \"$HOME/.config/opencode/plugin/opencode-queue\"",
     "pack:check": "npm pack --dry-run",
     "prepublishOnly": "npm test && npm run build",
     "test": "node --test test/plugin.test.mjs"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.14.46",
-    "@opencode-ai/sdk": "1.14.46"
+    "@opencode-ai/sdk": "1.14.46",
+    "cron": "^4.4.0"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
+    "esbuild": "^0.28.0",
     "typescript": "^5.9.3"
   }
 }

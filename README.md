@@ -17,6 +17,8 @@ The plugin stores a shared queue in `~/.config/opencode/queue.json`. When OpenCo
 - **Task dependencies** — parent-child relationships with configurable dependency modes
 - **Retry with backoff** — failed items retry automatically with increasing delays
 - **Blocked reminders** — periodically nudges when a queue item is waiting for a response
+- **Scheduled tasks** — one-off (run once at a specific time) or recurring (cron-based) scheduled items that automatically prepend to the front of the queue
+- **Schedule management** — pause, resume, and remove scheduled tasks; automatic auto-disable after a configurable number of occurrences
 - **Hot-reload config** — change queue settings without restarting OpenCode
 
 ## Tools
@@ -29,6 +31,8 @@ The plugin stores a shared queue in `~/.config/opencode/queue.json`. When OpenCo
 | `queue-followup` | Send a follow-up message on a `review_pending` item |
 | `queue-remove` | Remove a queue item |
 | `queue-retry` | Retry a failed item |
+| `queue-schedule-add` | Schedule a one-off or recurring task |
+| `queue-schedule-list` | List, pause, resume, or remove scheduled tasks |
 
 ## Installation
 

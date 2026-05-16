@@ -3,6 +3,7 @@ import { tool, type Plugin } from "@opencode-ai/plugin"
 import { randomUUID } from "crypto"
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, statSync } from "fs"
 import { join, resolve } from "path"
+import { CronJob } from "cron"
 
 const CONFIG_DIR = process.env.XDG_CONFIG_HOME || join(process.env.HOME!, ".config")
 const OPENCODE_DIR = join(CONFIG_DIR, "opencode")
@@ -59,11 +60,30 @@ interface QueueItem {
   sessionUrl: string | null
   retryCount: number
   nextRetryAt: string | null
+  sourceScheduleId: string | null
 }
 
 interface QueueStore {
   config: QueueConfig
   items: QueueItem[]
+  schedules: ScheduledTask[]
+}
+
+interface ScheduledTask {
+  id: string
+  workspace: string
+  goal: string
+  scheduledFor: string | null
+  cronExpression: string | null
+  timezone: string
+  enabled: boolean
+  lastTriggeredAt: string | null
+  nextTriggerAt: string | null
+  occurrenceCount: number
+  maxOccurrences: number | null
+  parentItemId: string | null
+  dependencyMode: "review_pending" | "completed"
+  createdAt: string
 }
 
 const DEFAULT_CONFIG: QueueConfig = {
@@ -105,6 +125,7 @@ class QueueManager {
       sessionUrl: item.sessionUrl ?? null,
       retryCount: typeof item.retryCount === "number" ? item.retryCount : 0,
       nextRetryAt: item.nextRetryAt ?? null,
+      sourceScheduleId: item.sourceScheduleId ?? null,
     }
   }
 
@@ -166,16 +187,17 @@ class QueueManager {
   private readStore(): QueueStore {
     try {
       if (!existsSync(QUEUE_FILE)) {
-        return { config: { ...DEFAULT_CONFIG }, items: [] }
+        return { config: { ...DEFAULT_CONFIG }, items: [], schedules: [] }
       }
       const raw = readFileSync(QUEUE_FILE, "utf-8")
       const parsed = JSON.parse(raw) as Partial<QueueStore>
       return {
         config: this.normalizeConfig(parsed.config),
         items: Array.isArray(parsed.items) ? parsed.items.map((item) => this.normalizeItem(item)) : [],
+        schedules: Array.isArray(parsed.schedules) ? parsed.schedules : [],
       }
     } catch {
-      return { config: { ...DEFAULT_CONFIG }, items: [] }
+      return { config: { ...DEFAULT_CONFIG }, items: [], schedules: [] }
     }
   }
 
@@ -219,7 +241,12 @@ class QueueManager {
   async addItem(
     workspace: string,
     goal: string,
-    options?: { parentItemId?: string | null; dependencyMode?: "review_pending" | "completed" },
+    options?: {
+      parentItemId?: string | null
+      dependencyMode?: "review_pending" | "completed"
+      sourceScheduleId?: string | null
+      prepend?: boolean
+    },
   ): Promise<QueueItem | { error: string }> {
     const absWorkspace = resolve(workspace)
     if (!existsSync(absWorkspace)) {
@@ -256,11 +283,16 @@ class QueueManager {
         sessionUrl: null,
         retryCount: 0,
         nextRetryAt: null,
+        sourceScheduleId: options?.sourceScheduleId ?? null,
       }
       if (item.parentItemId === item.id || this.wouldCreateDependencyCycle(item.id, item.parentItemId, store.items)) {
         return { error: `Dependency cycle detected for parent ${item.parentItemId}.` }
       }
-      store.items.push(item)
+      if (options?.prepend) {
+        store.items.unshift(item)
+      } else {
+        store.items.push(item)
+      }
       this.writeStore(store)
       return item
     })
@@ -382,6 +414,230 @@ class QueueManager {
       }
       if (changed) this.writeStore(store)
     })
+  }
+
+  listSchedules(): ScheduledTask[] {
+    return this.readStore().schedules
+  }
+
+  getSchedule(id: string): ScheduledTask | undefined {
+    return this.readStore().schedules.find((s) => s.id === id)
+  }
+
+  async addSchedule(schedule: Omit<ScheduledTask, "id" | "lastTriggeredAt" | "nextTriggerAt" | "occurrenceCount" | "createdAt">): Promise<ScheduledTask> {
+    const task: ScheduledTask = {
+      ...schedule,
+      id: randomUUID(),
+      lastTriggeredAt: null,
+      nextTriggerAt: null,
+      occurrenceCount: 0,
+      createdAt: new Date().toISOString(),
+    }
+    await FileLock.withLock(STORE_LOCK_FILE, STORE_LOCK_STALE_MS, STORE_LOCK_RETRY_MS, STORE_LOCK_WAIT_MS, async () => {
+      const store = this.readStore()
+      store.schedules.push(task)
+      this.writeStore(store)
+    })
+    return task
+  }
+
+  async updateSchedule(id: string, updates: Partial<ScheduledTask>): Promise<ScheduledTask | undefined> {
+    return FileLock.withLock(STORE_LOCK_FILE, STORE_LOCK_STALE_MS, STORE_LOCK_RETRY_MS, STORE_LOCK_WAIT_MS, async () => {
+      const store = this.readStore()
+      const idx = store.schedules.findIndex((s) => s.id === id)
+      if (idx === -1) return undefined
+      Object.assign(store.schedules[idx], updates)
+      this.writeStore(store)
+      return store.schedules[idx]
+    })
+  }
+
+  async removeSchedule(id: string): Promise<boolean> {
+    return FileLock.withLock(STORE_LOCK_FILE, STORE_LOCK_STALE_MS, STORE_LOCK_RETRY_MS, STORE_LOCK_WAIT_MS, async () => {
+      const store = this.readStore()
+      const idx = store.schedules.findIndex((s) => s.id === id)
+      if (idx === -1) return false
+      store.schedules.splice(idx, 1)
+      this.writeStore(store)
+      return true
+    })
+  }
+}
+
+class ScheduleManager {
+  private queueManager: QueueManager
+  private jobs: Map<string, CronJob> = new Map()
+
+  constructor(queueManager: QueueManager) {
+    this.queueManager = queueManager
+  }
+
+  start(): void {
+    const schedules = this.queueManager.listSchedules()
+    for (const schedule of schedules) {
+      if (schedule.enabled) {
+        this.startJob(schedule)
+      }
+    }
+  }
+
+  stop(): void {
+    for (const [id, job] of this.jobs) {
+      job.stop()
+      this.jobs.delete(id)
+    }
+  }
+
+  private startJob(schedule: ScheduledTask): void {
+    if (this.jobs.has(schedule.id)) {
+      this.jobs.get(schedule.id)!.stop()
+    }
+
+    const onFire = () => this.onTrigger(schedule.id)
+
+    if (schedule.scheduledFor) {
+      const fireDate = new Date(schedule.scheduledFor)
+      if (isNaN(fireDate.getTime())) return
+      if (fireDate.getTime() <= Date.now()) {
+        void this.onTrigger(schedule.id)
+        return
+      }
+      const job = new CronJob(fireDate, onFire, undefined, true, schedule.timezone)
+      this.jobs.set(schedule.id, job)
+    } else if (schedule.cronExpression) {
+      try {
+        const job = new CronJob(schedule.cronExpression, onFire, undefined, true, schedule.timezone)
+        this.jobs.set(schedule.id, job)
+      } catch {
+        // Invalid cron expression — skip
+      }
+    }
+  }
+
+  private async onTrigger(scheduleId: string): Promise<void> {
+    const result = await FileLock.withLock(
+      STORE_LOCK_FILE,
+      STORE_LOCK_STALE_MS,
+      STORE_LOCK_RETRY_MS,
+      STORE_LOCK_WAIT_MS,
+      async () => {
+        const store = this.queueManager["readStore"]() as QueueStore
+        const schedule = store.schedules.find((s) => s.id === scheduleId)
+        if (!schedule || !schedule.enabled) return null
+
+        schedule.lastTriggeredAt = new Date().toISOString()
+        schedule.occurrenceCount += 1
+
+        if (schedule.maxOccurrences !== null && schedule.occurrenceCount >= schedule.maxOccurrences) {
+          schedule.enabled = false
+        }
+
+        // For one-off: disable after firing
+        if (schedule.scheduledFor) {
+          schedule.enabled = false
+          schedule.nextTriggerAt = null
+        } else if (schedule.cronExpression) {
+          try {
+            const next = new CronJob(schedule.cronExpression, () => {}, undefined, true, schedule.timezone)
+            const nextDate = next.nextDate()
+            schedule.nextTriggerAt = nextDate ? nextDate.toISO() : null
+            next.stop()
+          } catch {
+            schedule.nextTriggerAt = null
+          }
+        }
+
+        const item: QueueItem = {
+          id: randomUUID(),
+          workspace: schedule.workspace,
+          goal: schedule.goal,
+          status: "pending",
+          parentItemId: schedule.parentItemId,
+          dependencyMode: schedule.dependencyMode,
+          dependencySatisfiedAt: null,
+          dependencySourceStatus: null,
+          dependencyBlockedReason: schedule.parentItemId ? `Waiting for parent ${schedule.parentItemId} to start.` : null,
+          staleDependency: false,
+          sessionId: null,
+          createdAt: new Date().toISOString(),
+          startedAt: null,
+          completedAt: null,
+          reviewedAt: null,
+          blockedReason: null,
+          error: null,
+          result: null,
+          sessionUrl: null,
+          retryCount: 0,
+          nextRetryAt: null,
+          sourceScheduleId: scheduleId,
+        }
+
+        store.items.unshift(item)
+        this.queueManager["writeStore"](store)
+
+        // If one-off or hit max, stop the job
+        if (!schedule.enabled && this.jobs.has(scheduleId)) {
+          this.jobs.get(scheduleId)!.stop()
+          this.jobs.delete(scheduleId)
+        }
+
+        return { schedule, itemId: item.id }
+      },
+    )
+
+    if (!result) return
+  }
+
+  async addAndStart(schedule: Omit<ScheduledTask, "id" | "lastTriggeredAt" | "nextTriggerAt" | "occurrenceCount" | "createdAt">): Promise<ScheduledTask> {
+    const task = await this.queueManager.addSchedule(schedule)
+
+    // Compute nextTriggerAt for recurring tasks
+    if (task.cronExpression) {
+      try {
+        const job = new CronJob(task.cronExpression, () => {}, undefined, true, task.timezone)
+        const nextDate = job.nextDate()
+        await this.queueManager.updateSchedule(task.id, {
+          nextTriggerAt: nextDate ? nextDate.toISO() : null,
+        })
+        job.stop()
+      } catch {}
+    } else if (task.scheduledFor) {
+      await this.queueManager.updateSchedule(task.id, {
+        nextTriggerAt: task.scheduledFor,
+      })
+    }
+
+    const updated = this.queueManager.getSchedule(task.id)!
+    if (updated.enabled) {
+      this.startJob(updated)
+    }
+    return updated
+  }
+
+  async removeAndStop(id: string): Promise<boolean> {
+    const job = this.jobs.get(id)
+    if (job) {
+      job.stop()
+      this.jobs.delete(id)
+    }
+    return this.queueManager.removeSchedule(id)
+  }
+
+  async pause(id: string): Promise<ScheduledTask | undefined> {
+    const job = this.jobs.get(id)
+    if (job) {
+      job.stop()
+      this.jobs.delete(id)
+    }
+    return this.queueManager.updateSchedule(id, { enabled: false })
+  }
+
+  async resume(id: string): Promise<ScheduledTask | undefined> {
+    const updated = await this.queueManager.updateSchedule(id, { enabled: true })
+    if (updated) {
+      this.startJob(updated)
+    }
+    return updated
   }
 }
 
@@ -957,6 +1213,7 @@ const SHARED_STATE_KEY = Symbol.for("opencode.queue.shared-state")
 interface SharedState {
   queueManager: QueueManager
   idleDetector: IdleDetector
+  scheduleManager: ScheduleManager
   coordinatorClaimed: boolean
   initialized: Promise<void>
   cleanupHandlers: Array<{
@@ -972,10 +1229,12 @@ function createSharedState(client: OpencodeClient, serverUrl: URL): SharedState 
     const processor = new QueueProcessor(queueManager, client, idleDetector, serverUrl)
     await processor.processQueue()
   })
+  const scheduleManager = new ScheduleManager(queueManager)
 
   return {
     queueManager,
     idleDetector,
+    scheduleManager,
     coordinatorClaimed: false,
     initialized: queueManager.resetRunningToPending(),
     cleanupHandlers: [],
@@ -986,6 +1245,7 @@ function createSharedState(client: OpencodeClient, serverUrl: URL): SharedState 
 function cleanupSharedState(shared: SharedState): void {
   if (shared.cleanedUp) return
   shared.cleanedUp = true
+  shared.scheduleManager.stop()
   shared.idleDetector.stop()
   FileLock.release(LOCK_FILE)
 }
@@ -1050,6 +1310,21 @@ function findQueueItem(queueManager: QueueManager, itemId: string): QueueItem | 
 
 function findItemBySession(queueManager: QueueManager, sessionId: string): QueueItem | undefined {
   return queueManager.listItems().find((item) => item.sessionId === sessionId)
+}
+
+function formatScheduledTask(schedule: ScheduledTask): string {
+  const kind = schedule.scheduledFor ? "one-off" : "recurring"
+  const status = schedule.enabled ? "enabled" : "disabled"
+  let line = `[${status.toUpperCase()}] ${schedule.id.substring(0, 8)} (${kind}) ${schedule.goal.substring(0, 80)}`
+  if (schedule.scheduledFor) line += `\nScheduled: ${schedule.scheduledFor}`
+  if (schedule.cronExpression) line += `\nCron: ${schedule.cronExpression}`
+  line += `\nTimezone: ${schedule.timezone}`
+  if (schedule.nextTriggerAt) line += `\nNext: ${schedule.nextTriggerAt}`
+  if (schedule.lastTriggeredAt) line += `\nLast: ${schedule.lastTriggeredAt}`
+  line += `\nOccurrences: ${schedule.occurrenceCount}`
+  if (schedule.maxOccurrences !== null) line += ` / ${schedule.maxOccurrences}`
+  if (schedule.parentItemId) line += `\nDepends: ${schedule.parentItemId.substring(0, 8)} @ ${schedule.dependencyMode}`
+  return line
 }
 
 function formatQueueItemSummary(item: QueueItem): string {
@@ -1140,6 +1415,7 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
     shared.coordinatorClaimed = true
     registerProcessCleanup(shared)
     idleDetector.start()
+    shared.scheduleManager.start()
   }
 
   const greeter = new SessionGreeter(() => queueManager.getConfig(), queueManager, client)
@@ -1319,6 +1595,124 @@ const OpencodeQueuePlugin: Plugin = async (ctx) => {
           return `Item ${item.id} reset to pending.`
         },
       }),
+
+      "queue-schedule-add": tool({
+        description: "Schedule a one-off or recurring task.",
+        args: {
+          workspace: tool.schema.string().describe("Absolute workspace path"),
+          goal: tool.schema.string().describe("Task goal"),
+          scheduledFor: tool.schema.string().optional().describe("ISO datetime for one-off task"),
+          cronExpression: tool.schema.string().optional().describe("Cron expression for recurring task"),
+          timezone: tool.schema.string().optional().describe('IANA timezone (default "UTC")'),
+          parentItemId: tool.schema.string().optional().describe("Parent item ID or prefix for dependency"),
+          dependencyMode: tool.schema.enum(["review_pending", "completed"]).optional().describe("When parent unlocks this item"),
+          maxOccurrences: tool.schema.number().optional().describe("Auto-disable after N firings (recurring only)"),
+        },
+        async execute(args) {
+          if (!args.scheduledFor && !args.cronExpression) {
+            return "Error: Provide either scheduledFor (one-off) or cronExpression (recurring)."
+          }
+          if (args.scheduledFor && args.cronExpression) {
+            return "Error: Provide only one of scheduledFor or cronExpression, not both."
+          }
+
+          const absWorkspace = resolve(args.workspace)
+          if (!existsSync(absWorkspace)) {
+            return `Error: Directory not found: ${absWorkspace}`
+          }
+          if (!statSync(absWorkspace).isDirectory()) {
+            return `Error: Path is not a directory: ${absWorkspace}`
+          }
+
+          if (args.scheduledFor) {
+            const fireDate = new Date(args.scheduledFor)
+            if (isNaN(fireDate.getTime())) {
+              return `Error: Invalid ISO datetime: ${args.scheduledFor}`
+            }
+            if (fireDate.getTime() <= Date.now()) {
+              return `Error: scheduledFor must be in the future.`
+            }
+          }
+
+          if (args.cronExpression) {
+            const { validateCronExpression } = await import("cron")
+            if (!validateCronExpression(args.cronExpression).valid) {
+              return `Error: Invalid cron expression: ${args.cronExpression}`
+            }
+          }
+
+          let parentId: string | null = null
+          if (args.parentItemId) {
+            const parent = findQueueItem(queueManager, args.parentItemId)
+            if (!parent) return `Error: Parent item ${args.parentItemId} not found.`
+            parentId = parent.id
+          }
+
+          const schedule = await shared.scheduleManager.addAndStart({
+            workspace: absWorkspace,
+            goal: args.goal,
+            scheduledFor: args.scheduledFor ?? null,
+            cronExpression: args.cronExpression ?? null,
+            timezone: args.timezone || "UTC",
+            enabled: true,
+            maxOccurrences: args.maxOccurrences ?? null,
+            parentItemId: parentId,
+            dependencyMode: args.dependencyMode === "completed" ? "completed" : "review_pending",
+          })
+
+          return formatScheduledTask(schedule)
+        },
+      }),
+
+      "queue-schedule-list": tool({
+        description: "List, remove, pause, or resume scheduled tasks.",
+        args: {
+          action: tool.schema.enum(["list", "remove", "pause", "resume"]).optional().describe("Action (default: list)"),
+          scheduleId: tool.schema.string().optional().describe("Target schedule ID"),
+        },
+        async execute(args) {
+          const action = args.action || "list"
+
+          if (action === "list") {
+            const schedules = queueManager.listSchedules()
+            if (schedules.length === 0) return "No scheduled tasks."
+            return schedules.map((s) => formatScheduledTask(s)).join("\n\n")
+          }
+
+          if (!args.scheduleId) {
+            return `Error: scheduleId is required for ${action} action.`
+          }
+          let scheduleId: string = args.scheduleId
+
+          const schedule = queueManager.getSchedule(scheduleId)
+          if (!schedule) {
+            // Try prefix match
+            const all = queueManager.listSchedules()
+            const match = all.find((s) => s.id.startsWith(scheduleId))
+            if (!match) return `Error: Schedule ${scheduleId} not found.`
+            scheduleId = match.id
+          }
+
+          if (action === "remove") {
+            const removed = await shared.scheduleManager.removeAndStop(scheduleId)
+            return removed ? `Removed schedule ${scheduleId}.` : `Error: Could not remove schedule ${scheduleId}.`
+          }
+
+          if (action === "pause") {
+            const updated = await shared.scheduleManager.pause(scheduleId)
+            if (!updated) return `Error: Schedule ${scheduleId} not found.`
+            return `Paused schedule ${updated.id}.\n${formatScheduledTask(updated)}`
+          }
+
+          if (action === "resume") {
+            const updated = await shared.scheduleManager.resume(scheduleId)
+            if (!updated) return `Error: Schedule ${scheduleId} not found.`
+            return `Resumed schedule ${updated.id}.\n${formatScheduledTask(updated)}`
+          }
+
+          return `Error: Unknown action: ${action}`
+        },
+      }),
     },
   }
 
@@ -1406,10 +1800,11 @@ const internals = {
   QueueProcessor,
   BlockWatcher,
   SessionGreeter,
+  ScheduleManager,
   resetSharedState,
 }
 
-export type { QueueConfig, QueueItem, QueueStore, BlockedReason }
+export type { QueueConfig, QueueItem, QueueStore, BlockedReason, ScheduledTask }
 export default Object.assign(OpencodeQueuePlugin, {
   __internals: internals,
 })
