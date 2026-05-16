@@ -103,7 +103,7 @@ export class QueueManager {
       goal: String(schedule.goal || ""),
       scheduledFor: schedule.scheduledFor ?? null,
       cronExpression: schedule.cronExpression ?? null,
-      timezone: String(schedule.timezone || "UTC"),
+      timezone: String(schedule.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone),
       enabled: Boolean(schedule.enabled),
       lastTriggeredAt: schedule.lastTriggeredAt ?? null,
       nextTriggerAt: schedule.nextTriggerAt ?? null,
