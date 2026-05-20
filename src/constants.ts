@@ -26,4 +26,5 @@ export const DEFAULT_CONFIG: QueueConfig = {
   maxRetries: 3,
   retryDelaysMinutes: [5, 10, 15],
   reminderIntervalMessages: 30,
+  sessionTimeoutMinutes: 60,
 }

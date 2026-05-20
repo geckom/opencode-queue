@@ -64,6 +64,7 @@ Registered tools:
 pending -> running -> review_pending -> completed
         -> blocked -> running
         -> failed -> pending
+        -> review_pending -> running (follow-up)
 ```
 
 - Scheduled items are prepended to the queue.

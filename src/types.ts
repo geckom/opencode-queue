@@ -20,6 +20,7 @@ export interface QueueConfig {
   maxRetries: number
   retryDelaysMinutes: number[]
   reminderIntervalMessages: number
+  sessionTimeoutMinutes: number
 }
 
 export interface BlockedReason {

@@ -93,45 +93,56 @@ export class QueueProcessor {
   }
 
   private async waitForCompletion(itemId: string, sessionId: string, q: { directory: string }): Promise<void> {
-    const maxWaitMs = 30 * 60 * 1000
-    const pollIntervalMs = 5_000
-    const startTime = Date.now()
+    try {
+      const maxWaitMs = this.queueManager.getConfig().sessionTimeoutMinutes * 60 * 1000
+      const pollIntervalMs = 5_000
+      const startTime = Date.now()
 
-    while (Date.now() - startTime < maxWaitMs) {
-      const blocked = await this.blockWatcher.checkForBlocks(this.queueManager.getItem(itemId)!)
-      if (blocked) return
+      while (Date.now() - startTime < maxWaitMs) {
+        const item = this.queueManager.getItem(itemId)
+        if (!item) return
 
-      const { data: statusMap } = await this.client.session.status({ query: q })
-      if (statusMap && statusMap[sessionId]) {
-        const status = statusMap[sessionId]
-        if (status.type === "idle") {
-          await this.captureResult(itemId, sessionId, q)
-          return
+        const blocked = await this.blockWatcher.checkForBlocks(item)
+        if (blocked) return
+
+        const { data: statusMap } = await this.client.session.status({ query: q })
+        if (statusMap && statusMap[sessionId]) {
+          const status = statusMap[sessionId]
+          if (status.type === "idle") {
+            await this.captureResult(itemId, sessionId, q)
+            return
+          }
+          if (status.type === "retry" && status.next) {
+            await new Promise((resolve) => setTimeout(resolve, Math.min(status.next - Date.now(), pollIntervalMs)))
+            continue
+          }
+        } else if (statusMap && !statusMap[sessionId]) {
+          const { data: messages } = await this.client.session.messages({
+            path: { id: sessionId },
+            query: q,
+          })
+          const hasAssistantMessage = Boolean(messages?.some((message) => message.info.role === "assistant"))
+          if (hasAssistantMessage) {
+            await this.captureResult(itemId, sessionId, q)
+            return
+          }
         }
-        if (status.type === "retry" && status.next) {
-          await new Promise((resolve) => setTimeout(resolve, Math.min(status.next - Date.now(), pollIntervalMs)))
-          continue
-        }
-      } else if (statusMap && !statusMap[sessionId]) {
-        const { data: messages } = await this.client.session.messages({
-          path: { id: sessionId },
-          query: q,
-        })
-        const hasAssistantMessage = Boolean(messages?.some((message) => message.info.role === "assistant"))
-        if (hasAssistantMessage) {
-          await this.captureResult(itemId, sessionId, q)
-          return
-        }
+
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
       }
 
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+      await this.queueManager.updateItem(itemId, {
+        status: "failed",
+        error: "Session timed out",
+        completedAt: new Date().toISOString(),
+      })
+    } catch (err) {
+      this.queueManager.updateItem(itemId, {
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err),
+        completedAt: new Date().toISOString(),
+      })
     }
-
-    await this.queueManager.updateItem(itemId, {
-      status: "failed",
-      error: "Session timed out after 30 minutes",
-      completedAt: new Date().toISOString(),
-    })
   }
 
   private async captureResult(itemId: string, sessionId: string, q: { directory: string }): Promise<void> {

@@ -164,6 +164,10 @@ export const OpencodeQueuePlugin: Plugin = async (ctx) => {
           await queueManager.markDescendantsStale(item.id)
           const processor = new QueueProcessor(queueManager, client, idleDetector, ctx.serverUrl)
           await processor.continueSession(item.id, item.sessionId, item.workspace)
+          const finalItem = findQueueItem(queueManager, item.id)
+          if (finalItem?.status === "failed") {
+            return `Error: Follow-up for item ${item.id} failed: ${finalItem.error || "Unknown error"}`
+          }
           return `Follow-up sent for ${item.id}.`
         },
       }),
