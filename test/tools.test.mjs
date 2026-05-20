@@ -87,9 +87,9 @@ test("queue-followup continues a review item and marks descendants stale", async
   await withTempRepo(async ({ configHome, workspace }) => {
     const prompts = []
     const client = createMockClient()
-    client.session.prompt = async (payload) => {
+    client.session.promptAsync = async (payload) => {
       prompts.push(payload)
-      return { data: { id: "m1" } }
+      return { data: undefined }
     }
 
     const { hooks, testingModule, restoreTimers } = await createPluginHooks({
@@ -101,6 +101,9 @@ test("queue-followup continues a review item and marks descendants stale", async
     const { QueueManager } = testingModule
     try {
       const queueManager = new QueueManager()
+      for (const existing of queueManager.listItems()) {
+        await queueManager.removeItem(existing.id)
+      }
       const parent = await queueManager.addItem(workspace, "Parent task")
       assert.ok("id" in parent)
       const child = await queueManager.addItem(workspace, "Child task", { parentItemId: parent.id })
@@ -132,6 +135,53 @@ test("queue-followup continues a review item and marks descendants stale", async
       assert.equal(updatedParent?.status, "review_pending")
       assert.match(updatedParent?.result || "", /Task finished successfully/)
       assert.equal(updatedChild?.staleDependency, true)
+    } finally {
+      restoreTimers?.()
+    }
+  })
+})
+
+test("processNext handles followupMessage items by reusing session", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const prompts = []
+    const client = createMockClient()
+    client.session.promptAsync = async (payload) => {
+      prompts.push(payload)
+      return { data: undefined }
+    }
+
+    const { testingModule, restoreTimers } = await createPluginHooks({
+      configHome,
+      workspace,
+      client,
+      stubTimers: true,
+    })
+    const { QueueManager, QueueProcessor } = testingModule
+    try {
+      const queueManager = new QueueManager()
+      for (const existing of queueManager.listItems()) {
+        await queueManager.removeItem(existing.id)
+      }
+
+      const item = await queueManager.addItem(workspace, "Original task")
+      assert.ok("id" in item)
+
+      await queueManager.updateItem(item.id, {
+        status: "pending",
+        sessionId: "existing-session",
+        followupMessage: "Please revise the output.",
+      })
+
+      const processor = new QueueProcessor(queueManager, client, { getConfig: () => queueManager.getConfig() }, new URL("http://127.0.0.1:4096"))
+      const processed = await processor.processNext()
+
+      assert.equal(processed, true)
+      assert.equal(prompts.length, 1)
+      assert.equal(prompts[0].body.parts[0].text, "Please revise the output.")
+
+      const updated = queueManager.getItem(item.id)
+      assert.equal(updated?.status, "review_pending")
+      assert.equal(updated?.followupMessage, null)
     } finally {
       restoreTimers?.()
     }

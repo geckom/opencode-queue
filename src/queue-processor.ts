@@ -44,8 +44,9 @@ export class QueueProcessor {
       }
 
       const q = { directory: item.workspace }
-
+      const isFollowup = Boolean(item.followupMessage) && Boolean(item.sessionId)
       let sessionId = item.sessionId
+
       if (!sessionId) {
         const { data: session } = await this.client.session.create({
           query: q,
@@ -67,14 +68,21 @@ export class QueueProcessor {
           status: "running",
         })
       } else {
-        await this.queueManager.updateItem(item.id, { status: "running" })
+        await this.queueManager.updateItem(item.id, {
+          status: "running",
+          ...(isFollowup ? { followupMessage: null } : {}),
+        })
+      }
+
+      if (isFollowup) {
+        await this.queueManager.markDescendantsStale(item.id)
       }
 
       await this.client.session.promptAsync({
         path: { id: sessionId },
         query: q,
         body: {
-          parts: [{ type: "text", text: item.goal }],
+          parts: [{ type: "text", text: isFollowup ? item.followupMessage! : item.goal }],
         },
       })
 
