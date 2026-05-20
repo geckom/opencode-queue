@@ -92,6 +92,7 @@ export class QueueManager {
       sessionUrl: item.sessionUrl ?? null,
       retryCount: typeof item.retryCount === "number" ? item.retryCount : 0,
       nextRetryAt: item.nextRetryAt ?? null,
+      followupMessage: item.followupMessage ?? null,
       sourceScheduleId: item.sourceScheduleId ?? null,
     }
   }
@@ -276,6 +277,7 @@ export class QueueManager {
         sessionUrl: null,
         retryCount: 0,
         nextRetryAt: null,
+        followupMessage: null,
         sourceScheduleId: options?.sourceScheduleId ?? null,
       }
       if (this.wouldCreateDependencyCycle(item.id, item.parentItemId, store.items)) {

@@ -59,6 +59,7 @@ export interface QueueItem {
   sessionUrl: string | null
   retryCount: number
   nextRetryAt: string | null
+  followupMessage?: string | null
   sourceScheduleId: string | null
 }
 
