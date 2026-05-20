@@ -144,27 +144,18 @@ export const OpencodeQueuePlugin: Plugin = async (ctx) => {
           }
           if (!item.sessionId) return `Error: Item ${item.id} has no session.`
 
-          try {
-            await client.session.prompt({
-              path: { id: item.sessionId },
-              query: { directory: item.workspace },
-              body: {
-                parts: [{ type: "text", text: args.message }],
-              },
-            })
-          } catch {
-            return `Error: Failed to send follow-up for item ${item.id}.`
-          }
-
           await queueManager.updateItem(item.id, {
-            status: "running",
+            status: "pending",
+            followupMessage: args.message,
             completedAt: null,
             reviewedAt: null,
             result: null,
           })
           await queueManager.markDescendantsStale(item.id)
+
           const processor = new QueueProcessor(queueManager, client, idleDetector, ctx.serverUrl)
-          await processor.continueSession(item.id, item.sessionId, item.workspace)
+          await processor.processNext()
+
           const finalItem = findQueueItem(queueManager, item.id)
           if (finalItem?.status === "failed") {
             return `Error: Follow-up for item ${item.id} failed: ${finalItem.error || "Unknown error"}`
