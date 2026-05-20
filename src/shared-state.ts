@@ -1,5 +1,6 @@
 import type { OpencodeClient } from "@opencode-ai/sdk"
-import { LOCK_FILE, SIGNAL_EXIT_CODE } from "./constants.js"
+import { existsSync, watch } from "fs"
+import { LOCK_FILE, QUEUE_FILE, SIGNAL_EXIT_CODE } from "./constants.js"
 import { FileLock } from "./file-lock.js"
 import { IdleDetector } from "./idle-detector.js"
 import { QueueProcessor } from "./queue-processor.js"
@@ -8,6 +9,8 @@ import { ScheduleManager } from "./schedule-manager.js"
 import { SessionGreeter } from "./session-greeter.js"
 
 const SHARED_STATE_KEY = Symbol.for("opencode.queue.shared-state")
+
+let activeFsWatcher: ReturnType<typeof watch> | undefined
 
 export interface SharedState {
   queueManager: QueueManager
@@ -32,6 +35,20 @@ export function createSharedState(client: OpencodeClient, serverUrl: URL): Share
   const scheduleManager = new ScheduleManager(queueManager)
   const sessionGreeter = new SessionGreeter(() => queueManager.getConfig(), queueManager, client)
 
+  let fsWatchTimer: ReturnType<typeof setTimeout> | undefined
+  try {
+    if (existsSync(QUEUE_FILE)) {
+      activeFsWatcher = watch(QUEUE_FILE, () => {
+        if (fsWatchTimer) clearTimeout(fsWatchTimer)
+        fsWatchTimer = setTimeout(() => {
+          fsWatchTimer = undefined
+          const processor = new QueueProcessor(queueManager, client, idleDetector, serverUrl)
+          void processor.processQueue()
+        }, 500)
+      })
+    }
+  } catch {}
+
   return {
     queueManager,
     idleDetector,
@@ -50,6 +67,8 @@ export function cleanupSharedState(shared: SharedState): void {
   shared.scheduleManager.stop()
   shared.idleDetector.stop()
   shared.sessionGreeter.stop()
+  try { activeFsWatcher?.close() } catch {}
+  activeFsWatcher = undefined
   FileLock.release(LOCK_FILE)
 }
 
