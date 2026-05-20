@@ -31,6 +31,7 @@ export const OpencodeQueuePlugin: Plugin = async (ctx) => {
   const isCoordinator = !shared.coordinatorClaimed
   if (isCoordinator) {
     shared.coordinatorClaimed = true
+    await queueManager.resetRunningToPending()
     const { registerProcessCleanup } = await import("./shared-state.js")
     registerProcessCleanup(shared)
     idleDetector.start()
