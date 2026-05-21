@@ -1,5 +1,5 @@
 {
-  "name": "opencode-queue",
+  "name": "@geckom/opencode-queue",
   "version": "0.1.1",
   "description": "OpenCode plugin that maintains a global task queue and processes queued work when OpenCode is idle.",
   "author": "Geckom",

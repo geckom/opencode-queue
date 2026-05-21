@@ -53,7 +53,7 @@ Add to your `opencode.json`:
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
-    "opencode-queue"
+    "@geckom/opencode-queue"
   ]
 }
 ```
@@ -63,7 +63,7 @@ Alternatively, install directly from GitHub:
 ```json
 {
   "plugin": [
-    "opencode-queue@git+https://github.com/geckom/opencode-queue.git"
+    "@geckom/opencode-queue@git+https://github.com/geckom/opencode-queue.git"
   ]
 }
 ```
