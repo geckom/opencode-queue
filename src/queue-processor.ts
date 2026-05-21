@@ -5,6 +5,7 @@ import { BlockWatcher } from "./block-watcher.js"
 import { FileLock } from "./file-lock.js"
 import { IdleDetector } from "./idle-detector.js"
 import { QueueManager } from "./queue-manager.js"
+import { sleep } from "./utils.js"
 
 type ProcessResult = {
   processed: boolean
@@ -83,10 +84,14 @@ export class QueueProcessor {
           sessionUrl: new URL(`/session/${session.id}`, this.serverUrl).toString(),
           startedAt: new Date().toISOString(),
           status: "running",
+          nextRetryAt: null,
+          error: null,
         })
       } else {
         await this.queueManager.updateItem(item.id, {
           status: "running",
+          nextRetryAt: null,
+          error: null,
           ...(isFollowup ? { followupMessage: null } : {}),
         })
       }
@@ -107,7 +112,7 @@ export class QueueProcessor {
       const current = this.queueManager.getItem(item.id)
       return { processed: true, continueQueue: current?.status !== "blocked" }
     } catch (err) {
-      this.handleSessionError(item.id, err)
+      await this.handleSessionError(item.id, err)
       return { processed: true, continueQueue: true }
     } finally {
       this.isProcessing = false
@@ -115,7 +120,19 @@ export class QueueProcessor {
   }
 
   async continueSession(itemId: string, sessionId: string, workspace: string): Promise<void> {
-    await this.waitForCompletion(itemId, sessionId, { directory: workspace })
+    const deadline = Date.now() + this.queueManager.getConfig().sessionTimeoutMinutes * 60 * 1000
+    while (!(await FileLock.acquire(LOCK_FILE, PROCESSING_LOCK_STALE_MS))) {
+      if (Date.now() >= deadline) return
+      await sleep(1_000)
+    }
+
+    const heartbeat = FileLock.startHeartbeat(LOCK_FILE, PROCESSING_LOCK_REFRESH_MS)
+    try {
+      await this.waitForCompletion(itemId, sessionId, { directory: workspace })
+    } finally {
+      FileLock.stopHeartbeat(heartbeat)
+      FileLock.release(LOCK_FILE)
+    }
   }
 
   private async waitForCompletion(itemId: string, sessionId: string, q: { directory: string }): Promise<void> {
@@ -163,7 +180,7 @@ export class QueueProcessor {
         completedAt: new Date().toISOString(),
       })
     } catch (err) {
-      this.queueManager.updateItem(itemId, {
+      await this.queueManager.updateItem(itemId, {
         status: "failed",
         error: err instanceof Error ? err.message : String(err),
         completedAt: new Date().toISOString(),
@@ -193,6 +210,8 @@ export class QueueProcessor {
         completedAt: null,
         reviewedAt: null,
         retryCount: 0,
+        nextRetryAt: null,
+        error: null,
       })
     } catch {
       await this.queueManager.updateItem(itemId, {
@@ -201,11 +220,13 @@ export class QueueProcessor {
         completedAt: null,
         reviewedAt: null,
         retryCount: 0,
+        nextRetryAt: null,
+        error: null,
       })
     }
   }
 
-  private handleSessionError(itemId: string, err: unknown): void {
+  private async handleSessionError(itemId: string, err: unknown): Promise<void> {
     const item = this.queueManager.getItem(itemId)
     if (!item) return
 
@@ -213,7 +234,7 @@ export class QueueProcessor {
     const newRetryCount = item.retryCount + 1
 
     if (newRetryCount >= config.maxRetries) {
-      void this.queueManager.updateItem(itemId, {
+      await this.queueManager.updateItem(itemId, {
         status: "failed",
         error: err instanceof Error ? err.message : String(err),
         retryCount: newRetryCount,
@@ -223,8 +244,8 @@ export class QueueProcessor {
     }
 
     const delayMinutes = config.retryDelaysMinutes[newRetryCount - 1] || 15
-    void this.queueManager.updateItem(itemId, {
-      status: "running",
+    await this.queueManager.updateItem(itemId, {
+      status: "pending",
       retryCount: newRetryCount,
       nextRetryAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
       error: err instanceof Error ? err.message : String(err),

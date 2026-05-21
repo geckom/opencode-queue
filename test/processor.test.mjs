@@ -265,6 +265,92 @@ test("processQueue stops after a task becomes blocked", async () => {
   })
 })
 
+test("continueSession holds the processing lock while resumed session runs", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const { testingModule } = await loadBuiltModules(configHome)
+    const { QueueManager, QueueProcessor, IdleDetector, QUEUE_FILE } = testingModule
+    try {
+      unlinkSync(QUEUE_FILE)
+    } catch {}
+
+    const queueManager = new QueueManager()
+    const blockedItem = await queueManager.addItem(workspace, "Resume me")
+    const pendingItem = await queueManager.addItem(workspace, "Must still wait")
+    assert.ok("id" in blockedItem)
+    assert.ok("id" in pendingItem)
+    await queueManager.updateItem(blockedItem.id, { status: "running", sessionId: "s1" })
+
+    let releaseMessages
+    let messagesStarted
+    let messageReads = 0
+    const messagesStartedPromise = new Promise((resolve) => {
+      messagesStarted = resolve
+    })
+    const releaseMessagesPromise = new Promise((resolve) => {
+      releaseMessages = resolve
+    })
+    const client = createMockClient()
+    client.session.status = async () => ({ data: { s1: { type: "idle" } } })
+    client.session.messages = async () => {
+      messageReads += 1
+      if (messageReads === 1) {
+        messagesStarted()
+        await releaseMessagesPromise
+      }
+      return {
+        data: [
+          {
+            info: { role: "assistant" },
+            parts: [{ type: "text", text: "Resumed task finished" }],
+          },
+        ],
+      }
+    }
+
+    const idleDetector = new IdleDetector(() => queueManager.getConfig(), async () => {})
+    const processor1 = new QueueProcessor(queueManager, client, idleDetector, new URL("http://127.0.0.1:4096"))
+    const processor2 = new QueueProcessor(queueManager, client, idleDetector, new URL("http://127.0.0.1:4096"))
+
+    const resumed = processor1.continueSession(blockedItem.id, "s1", workspace)
+    await messagesStartedPromise
+    const processed = await processor2.processNext()
+    releaseMessages()
+    await resumed
+
+    assert.equal(processed, false)
+    assert.equal(queueManager.getItem(blockedItem.id).status, "review_pending")
+    assert.equal(queueManager.getItem(pendingItem.id).status, "pending")
+  })
+})
+
+test("pending retry items wait until nextRetryAt before processing", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const { testingModule } = await loadBuiltModules(configHome)
+    const { QueueManager, QUEUE_FILE } = testingModule
+    try {
+      unlinkSync(QUEUE_FILE)
+    } catch {}
+
+    const queueManager = new QueueManager()
+    const delayed = await queueManager.addItem(workspace, "Delayed retry")
+    assert.ok("id" in delayed)
+    await queueManager.updateItem(delayed.id, {
+      status: "pending",
+      retryCount: 1,
+      nextRetryAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+
+    assert.equal(await queueManager.getNextPending(), undefined)
+
+    await queueManager.updateItem(delayed.id, {
+      nextRetryAt: new Date(Date.now() - 1000).toISOString(),
+    })
+
+    const next = await queueManager.getNextPending()
+    assert.equal(next.id, delayed.id)
+  })
+})
+
 test("corrupted queue store is preserved and mutation is refused", async () => {
   await withTempRepo(async ({ configHome }) => {
     const { testingModule } = await loadBuiltModules(configHome)

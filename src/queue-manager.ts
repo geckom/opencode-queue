@@ -356,9 +356,10 @@ export class QueueManager {
         let nextItem: QueueItem | undefined
 
         for (const item of store.items) {
-          const isReadyRetry = item.status === "running" && item.nextRetryAt && new Date(item.nextRetryAt).getTime() <= now
-          const isPending = item.status === "pending"
-          if (!isPending && !isReadyRetry) continue
+          const nextRetryAt = item.nextRetryAt ? new Date(item.nextRetryAt).getTime() : null
+          const isReadyPending = item.status === "pending" && (nextRetryAt === null || nextRetryAt <= now)
+          const isLegacyReadyRetry = item.status === "running" && nextRetryAt !== null && nextRetryAt <= now
+          if (!isReadyPending && !isLegacyReadyRetry) continue
 
           const dependency = this.evaluateDependency(item, store.items)
           if (item.dependencyBlockedReason !== dependency.blockedReason) {
