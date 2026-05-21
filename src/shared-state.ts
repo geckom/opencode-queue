@@ -45,7 +45,9 @@ export function createSharedState(client: OpencodeClient, serverUrl: URL): Share
           const processor = new QueueProcessor(queueManager, client, idleDetector, serverUrl)
           void processor.processQueue()
         }, 500)
+        fsWatchTimer.unref?.()
       })
+      activeFsWatcher.unref?.()
     }
   } catch {}
 
