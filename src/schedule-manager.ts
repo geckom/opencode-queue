@@ -14,6 +14,20 @@ export class ScheduleManager {
     this.queueManager = queueManager
   }
 
+  private createJob(schedule: ScheduledTask, onFire: () => void): CronJob {
+    return new CronJob(
+      schedule.scheduledFor ? new Date(schedule.scheduledFor) : schedule.cronExpression!,
+      onFire,
+      undefined,
+      true,
+      schedule.timezone,
+      null,
+      false,
+      null,
+      true,
+    )
+  }
+
   start(): void {
     const schedules = this.queueManager.listSchedules()
     for (const schedule of schedules) {
@@ -42,14 +56,14 @@ export class ScheduleManager {
         void this.onTrigger(schedule.id)
         return
       }
-      const job = new CronJob(fireDate, onFire, undefined, true, schedule.timezone)
+      const job = this.createJob(schedule, onFire)
       this.jobs.set(schedule.id, job)
       return
     }
 
     if (schedule.cronExpression) {
       try {
-        const job = new CronJob(schedule.cronExpression, onFire, undefined, true, schedule.timezone)
+        const job = this.createJob(schedule, onFire)
         this.jobs.set(schedule.id, job)
       } catch {
         // Invalid cron expression. Leave the persisted schedule untouched.
@@ -74,7 +88,7 @@ export class ScheduleManager {
 
     if (task.cronExpression) {
       try {
-        const job = new CronJob(task.cronExpression, () => {}, undefined, true, task.timezone)
+        const job = new CronJob(task.cronExpression, () => {}, undefined, false, task.timezone)
         const nextDate = job.nextDate()
         await this.queueManager.updateSchedule(task.id, {
           nextTriggerAt: nextDate ? nextDate.toISO() : null,
@@ -114,7 +128,7 @@ export class ScheduleManager {
 
     if (updated.cronExpression) {
       try {
-        const job = new CronJob(updated.cronExpression, () => {}, undefined, true, updated.timezone)
+        const job = new CronJob(updated.cronExpression, () => {}, undefined, false, updated.timezone)
         const nextDate = job.nextDate()
         job.stop()
         await this.queueManager.updateSchedule(updated.id, {

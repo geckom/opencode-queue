@@ -313,6 +313,17 @@ export class QueueManager {
     })
   }
 
+  async updateItemAndMoveToFront(id: string, updates: Partial<QueueItem>): Promise<QueueItem | undefined> {
+    return this.mutateStore((store) => {
+      const idx = store.items.findIndex((item) => item.id === id)
+      if (idx === -1) return undefined
+      Object.assign(store.items[idx], updates)
+      const [item] = store.items.splice(idx, 1)
+      store.items.unshift(item)
+      return item
+    })
+  }
+
   async removeItem(id: string): Promise<boolean> {
     return this.mutateStore((store) => {
       const idx = store.items.findIndex((item) => item.id === id)

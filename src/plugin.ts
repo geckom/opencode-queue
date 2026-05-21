@@ -144,7 +144,7 @@ export const OpencodeQueuePlugin: Plugin = async (ctx) => {
           }
           if (!item.sessionId) return `Error: Item ${item.id} has no session.`
 
-          await queueManager.updateItem(item.id, {
+          await queueManager.updateItemAndMoveToFront(item.id, {
             status: "pending",
             followupMessage: args.message,
             completedAt: null,

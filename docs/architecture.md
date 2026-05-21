@@ -29,5 +29,7 @@
 ## Design Notes
 
 - Queue state mutations must flow through `QueueManager` and `FileLock`.
+- Queue/session processing must hold `queue.lock` so only one item runs or resumes across OpenCode instances.
 - `ScheduleManager` should not reach into private persistence internals; it should call explicit `QueueManager` APIs.
+- Cron timers and other background timers should be unref'd so they do not keep short-lived OpenCode processes alive.
 - Tests should import `dist/testing.js` instead of runtime plugin internals so the deployed bundle stays minimal.

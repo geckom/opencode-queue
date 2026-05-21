@@ -54,6 +54,7 @@ Registered tools:
 - Timers must be `unref()`'d.
 - Toasts/reminders are best-effort only and must not block startup or processing.
 - Never silently reset corrupted `queue.json`. Preserve it and fail safely.
+- All queue processing entry points, including follow-ups and blocked-session resumes, must respect `queue.lock`.
 - Tests depend on compiled `dist/`; do not run build and test in parallel.
 
 ## Behavior Notes
@@ -63,13 +64,16 @@ Registered tools:
 ```text
 pending -> running -> review_pending -> completed
         -> blocked -> running
-        -> failed -> pending
-        -> review_pending -> running (follow-up)
+        -> pending (automatic retry with nextRetryAt)
+failed -> pending (manual retry)
+review_pending -> pending -> running (follow-up)
 ```
 
 - Scheduled items are prepended to the queue.
 - One-off schedules disable after firing.
 - Recurring schedules run until paused or `maxOccurrences` is reached.
+- Only one queued item should be running or resumed by the processor at a time across OpenCode instances.
+- Pending retry items must not be selected until `nextRetryAt`.
 - Corrupted `queue.json` is a hard error; the plugin preserves a backup and refuses further mutation until repaired.
 - Blocked reminders are time-based toasts controlled by `blockedReminderMinutes`.
 

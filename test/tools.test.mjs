@@ -104,6 +104,8 @@ test("queue-followup continues a review item and marks descendants stale", async
       for (const existing of queueManager.listItems()) {
         await queueManager.removeItem(existing.id)
       }
+      const unrelated = await queueManager.addItem(workspace, "Unrelated pending task")
+      assert.ok("id" in unrelated)
       const parent = await queueManager.addItem(workspace, "Parent task")
       assert.ok("id" in parent)
       const child = await queueManager.addItem(workspace, "Child task", { parentItemId: parent.id })

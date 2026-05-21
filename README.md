@@ -18,7 +18,7 @@ For the local development/runtime flow, see [docs/architecture.md](docs/architec
 
 ## How it works
 
-The plugin stores a shared queue in `~/.config/opencode/queue.json`. When OpenCode is idle, it picks the next pending item, creates a session for it, and monitors progress. Blocked items (permission requests, questions) stay in the queue until resolved. Completed work enters a review state before final close-out.
+The plugin stores a shared queue in `~/.config/opencode/queue.json`. When OpenCode is idle, one process-wide queue processor picks the next pending item, creates or resumes a session for it, and monitors progress. Blocked items (permission requests, questions) hold the queue until resolved. Completed work enters a review state before final close-out.
 
 ### Features
 
@@ -27,7 +27,7 @@ The plugin stores a shared queue in `~/.config/opencode/queue.json`. When OpenCo
 - **Permission and question handling** — detects blocked sessions and auto-resumes when you respond through any opencode interface
 - **Review gate** — finished work enters `review_pending` state for human sign-off before marking complete
 - **Task dependencies** — parent-child relationships with configurable dependency modes
-- **Retry with backoff** — failed items retry automatically with increasing delays
+- **Retry with backoff** — transient processing errors requeue items as pending with increasing retry delays
 - **Blocked reminders** — time-based reminder toasts for blocked queue items
 - **Scheduled tasks** — one-off (run once at a specific time) or recurring (cron-based) scheduled items that automatically prepend to the front of the queue
 - **Schedule management** — pause, resume, and remove scheduled tasks; automatic auto-disable after a configurable number of occurrences
@@ -71,6 +71,7 @@ The queue reads its settings from `~/.config/opencode/queue.json`. Edit the `con
 | `maxRetries` | `3` | Maximum retry attempts for failed items |
 | `retryDelaysMinutes` | `[5, 10, 15]` | Delay in minutes before each retry attempt |
 | `reminderIntervalMessages` | `30` | Messages between blocked-item reminders |
+| `sessionTimeoutMinutes` | `60` | Maximum minutes to wait for a running session before marking it failed |
 
 ## Development
 

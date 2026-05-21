@@ -58,6 +58,7 @@ test("recurring schedule generates items and updates occurrence count", async ()
       parentItemId: null,
       dependencyMode: "review_pending",
     })
+    assert.equal(scheduleManager.jobs.get(task.id).unrefTimeout, true)
 
     await sleep(2500)
 
