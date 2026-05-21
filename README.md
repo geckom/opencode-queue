@@ -14,8 +14,6 @@ The source is split into focused modules under `src/`, while the runtime deploy 
 - `src/schedule-manager.ts` owns cron jobs and delegates persisted mutations back to `QueueManager`
 - `src/testing.ts` exposes a test-only surface used by compiled-output tests
 
-For the local development/runtime flow, see [docs/architecture.md](docs/architecture.md).
-
 ## How it works
 
 The plugin stores a shared queue in `~/.config/opencode/queue.json`. When OpenCode is idle, one process-wide queue processor picks the next pending item, creates or resumes a session for it, and monitors progress. Blocked items (permission requests, questions) hold the queue until resolved. Completed work enters a review state before final close-out.
