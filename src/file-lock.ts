@@ -19,6 +19,16 @@ void CONFIG_DIR
 const LOCK_OWNERS = new Map<string, string>()
 
 export class FileLock {
+  static isFresh(lockFile = LOCK_FILE, staleMs = PROCESSING_LOCK_STALE_MS): boolean {
+    try {
+      if (!existsSync(lockFile)) return false
+      const stat = statSync(lockFile)
+      return Date.now() - stat.mtimeMs <= staleMs
+    } catch {
+      return false
+    }
+  }
+
   static async acquire(lockFile = LOCK_FILE, staleMs = PROCESSING_LOCK_STALE_MS): Promise<boolean> {
     try {
       if (!existsSync(OPENCODE_DIR)) {

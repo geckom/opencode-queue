@@ -6,6 +6,11 @@ import { FileLock } from "./file-lock.js"
 import { IdleDetector } from "./idle-detector.js"
 import { QueueManager } from "./queue-manager.js"
 
+type ProcessResult = {
+  processed: boolean
+  continueQueue: boolean
+}
+
 /**
  * QueueProcessor is the state machine executor. It owns session creation,
  * completion polling, and retry transitions for a single coordinator.
@@ -27,9 +32,21 @@ export class QueueProcessor {
   }
 
   async processNext(): Promise<boolean> {
-    if (this.isProcessing) return false
+    if (!(await FileLock.acquire(LOCK_FILE, PROCESSING_LOCK_STALE_MS))) return false
+    const heartbeat = FileLock.startHeartbeat(LOCK_FILE, PROCESSING_LOCK_REFRESH_MS)
+    try {
+      const result = await this.processNextLocked()
+      return result.processed
+    } finally {
+      FileLock.stopHeartbeat(heartbeat)
+      FileLock.release(LOCK_FILE)
+    }
+  }
+
+  private async processNextLocked(): Promise<ProcessResult> {
+    if (this.isProcessing) return { processed: false, continueQueue: false }
     const item = await this.queueManager.getNextPending()
-    if (!item) return false
+    if (!item) return { processed: false, continueQueue: false }
 
     this.isProcessing = true
     try {
@@ -40,7 +57,7 @@ export class QueueProcessor {
           completedAt: new Date().toISOString(),
         })
         this.isProcessing = false
-        return true
+        return { processed: true, continueQueue: true }
       }
 
       const q = { directory: item.workspace }
@@ -58,7 +75,7 @@ export class QueueProcessor {
             error: "Failed to create session",
           })
           this.isProcessing = false
-          return true
+          return { processed: true, continueQueue: true }
         }
         sessionId = session.id
         await this.queueManager.updateItem(item.id, {
@@ -87,10 +104,11 @@ export class QueueProcessor {
       })
 
       await this.waitForCompletion(item.id, sessionId, q)
-      return true
+      const current = this.queueManager.getItem(item.id)
+      return { processed: true, continueQueue: current?.status !== "blocked" }
     } catch (err) {
       this.handleSessionError(item.id, err)
-      return true
+      return { processed: true, continueQueue: true }
     } finally {
       this.isProcessing = false
     }
@@ -219,8 +237,8 @@ export class QueueProcessor {
     try {
       let hasMore = true
       while (hasMore) {
-        const processed = await this.processNext()
-        if (!processed) {
+        const result = await this.processNextLocked()
+        if (!result.processed || !result.continueQueue) {
           hasMore = false
           continue
         }

@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, mkdirSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import {
   createMockClient,
   loadBuiltModules,
@@ -11,7 +11,10 @@ import {
 test("processor moves a finished pending item into review and stores the result", async () => {
   await withTempRepo(async ({ configHome, workspace }) => {
     const { testingModule } = await loadBuiltModules(configHome)
-    const { QueueManager, QueueProcessor, IdleDetector } = testingModule
+    const { QueueManager, QueueProcessor, IdleDetector, QUEUE_FILE } = testingModule
+    try {
+      unlinkSync(QUEUE_FILE)
+    } catch {}
 
     const queueManager = new QueueManager()
     const created = await queueManager.addItem(workspace, "Run the queued task")
@@ -123,13 +126,13 @@ test("question events move running items into blocked state", async () => {
 test("stale processing lock can be taken over by a new processor", async () => {
   await withTempRepo(async ({ configHome, workspace }) => {
     const { testingModule } = await loadBuiltModules(configHome)
-    const { QueueManager, QueueProcessor, IdleDetector } = testingModule
+    const { QueueManager, QueueProcessor, IdleDetector, QUEUE_FILE } = testingModule
 
     const queueManager = new QueueManager()
     const created = await queueManager.addItem(workspace, "Take over stale lock")
     assert.ok("id" in created)
-    const lockPath = join(configHome, "opencode", "queue.lock")
-    mkdirSync(join(configHome, "opencode"), { recursive: true })
+    const lockPath = join(dirname(QUEUE_FILE), "queue.lock")
+    mkdirSync(dirname(QUEUE_FILE), { recursive: true })
     writeFileSync(lockPath, "999\n0", "utf8")
     const stale = new Date(Date.now() - 5 * 60 * 1000)
     utimesSync(lockPath, stale, stale)
@@ -142,6 +145,123 @@ test("stale processing lock can be taken over by a new processor", async () => {
 
     const item = queueManager.listItems()[0]
     assert.equal(item.status, "review_pending")
+  })
+})
+
+test("fresh processing lock prevents startup from resetting running items", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const { testingModule } = await loadBuiltModules(configHome)
+    const { QueueManager, QUEUE_FILE } = testingModule
+
+    const queueManager = new QueueManager()
+    const created = await queueManager.addItem(workspace, "Already running")
+    assert.ok("id" in created)
+    await queueManager.updateItem(created.id, { status: "running", sessionId: "s1" })
+
+    const lockPath = join(dirname(QUEUE_FILE), "queue.lock")
+    mkdirSync(dirname(QUEUE_FILE), { recursive: true })
+    writeFileSync(lockPath, "123:owner\n0", "utf8")
+
+    try {
+      await queueManager.resetRunningToPending()
+
+      const item = queueManager.getItem(created.id)
+      assert.equal(item.status, "running")
+    } finally {
+      try {
+        unlinkSync(lockPath)
+      } catch {}
+    }
+  })
+})
+
+test("processNext uses the processing lock across processor instances", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const { testingModule } = await loadBuiltModules(configHome)
+    const { QueueManager, QueueProcessor, IdleDetector } = testingModule
+
+    const queueManager = new QueueManager()
+    const firstItem = await queueManager.addItem(workspace, "First task")
+    const secondItem = await queueManager.addItem(workspace, "Second task")
+    assert.ok("id" in firstItem)
+    assert.ok("id" in secondItem)
+
+    let releaseMessages
+    let messagesStarted
+    const messagesStartedPromise = new Promise((resolve) => {
+      messagesStarted = resolve
+    })
+    const releaseMessagesPromise = new Promise((resolve) => {
+      releaseMessages = resolve
+    })
+    const client = createMockClient()
+    client.session.messages = async () => {
+      messagesStarted()
+      await releaseMessagesPromise
+      return {
+        data: [
+          {
+            info: { role: "assistant" },
+            parts: [{ type: "text", text: "Task finished successfully" }],
+          },
+        ],
+      }
+    }
+    client.session.status = async () => ({ data: { s1: { type: "idle" } } })
+
+    const idleDetector = new IdleDetector(() => queueManager.getConfig(), async () => {})
+    const processor1 = new QueueProcessor(queueManager, client, idleDetector, new URL("http://127.0.0.1:4096"))
+    const processor2 = new QueueProcessor(queueManager, client, idleDetector, new URL("http://127.0.0.1:4096"))
+
+    const first = processor1.processNext()
+    await messagesStartedPromise
+    const second = await processor2.processNext()
+    releaseMessages()
+    const firstResult = await first
+
+    assert.equal(firstResult, true)
+    assert.equal(second, false)
+    assert.equal(queueManager.getItem(firstItem.id).status, "review_pending")
+    assert.equal(queueManager.getItem(secondItem.id).status, "pending")
+  })
+})
+
+test("processQueue stops after a task becomes blocked", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const { testingModule } = await loadBuiltModules(configHome)
+    const { QueueManager, QueueProcessor, IdleDetector, QUEUE_FILE } = testingModule
+    try {
+      unlinkSync(QUEUE_FILE)
+    } catch {}
+
+    const queueManager = new QueueManager()
+    const firstItem = await queueManager.addItem(workspace, "Needs answer")
+    const secondItem = await queueManager.addItem(workspace, "Must wait")
+    assert.ok("id" in firstItem)
+    assert.ok("id" in secondItem)
+
+    const client = createMockClient()
+    client.session.messages = async () => ({
+      data: [
+        {
+          info: { role: "assistant" },
+          parts: [
+            {
+              type: "tool",
+              tool: "question",
+              state: { status: "pending", input: { question: "Pick one", options: ["A", "B"] } },
+            },
+          ],
+        },
+      ],
+    })
+
+    const idleDetector = new IdleDetector(() => queueManager.getConfig(), async () => {})
+    const processor = new QueueProcessor(queueManager, client, idleDetector, new URL("http://127.0.0.1:4096"))
+    await processor.processQueue()
+
+    assert.equal(queueManager.getItem(firstItem.id).status, "blocked")
+    assert.equal(queueManager.getItem(secondItem.id).status, "pending")
   })
 })
 

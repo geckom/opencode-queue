@@ -4,7 +4,9 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync
 import { resolve } from "path"
 import {
   DEFAULT_CONFIG,
+  LOCK_FILE,
   OPENCODE_DIR,
+  PROCESSING_LOCK_STALE_MS,
   QUEUE_CORRUPTION_MARKER_FILE,
   QUEUE_FILE,
   STORE_LOCK_FILE,
@@ -397,6 +399,8 @@ export class QueueManager {
   }
 
   async resetRunningToPending(): Promise<void> {
+    if (FileLock.isFresh(LOCK_FILE, PROCESSING_LOCK_STALE_MS)) return
+
     await this.mutateStore((store) => {
       for (const item of store.items) {
         if (item.status === "running") {
