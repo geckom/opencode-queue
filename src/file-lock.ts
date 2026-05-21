@@ -3,7 +3,8 @@
  * All persisted queue state mutations must flow through this helper.
  */
 
-import { existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from "fs"
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs"
+import { randomUUID } from "crypto"
 import {
   CONFIG_DIR,
   LOCK_FILE,
@@ -14,6 +15,8 @@ import {
 import { sleep } from "./utils.js"
 
 void CONFIG_DIR
+
+const LOCK_OWNERS = new Map<string, string>()
 
 export class FileLock {
   static async acquire(lockFile = LOCK_FILE, staleMs = PROCESSING_LOCK_STALE_MS): Promise<boolean> {
@@ -29,7 +32,14 @@ export class FileLock {
           return false
         }
       }
-      writeFileSync(lockFile, `${process.pid}\n${Date.now()}`, "utf-8")
+      const owner = `${process.pid}:${randomUUID()}`
+      const fd = openSync(lockFile, "wx")
+      try {
+        writeFileSync(fd, `${owner}\n${Date.now()}`, "utf-8")
+      } finally {
+        closeSync(fd)
+      }
+      LOCK_OWNERS.set(lockFile, owner)
       return true
     } catch {
       return false
@@ -38,10 +48,12 @@ export class FileLock {
 
   static refresh(lockFile = LOCK_FILE): void {
     try {
+      const owner = LOCK_OWNERS.get(lockFile)
+      if (!owner) return
       if (!existsSync(OPENCODE_DIR)) {
         mkdirSync(OPENCODE_DIR, { recursive: true })
       }
-      writeFileSync(lockFile, `${process.pid}\n${Date.now()}`, "utf-8")
+      writeFileSync(lockFile, `${owner}\n${Date.now()}`, "utf-8")
     } catch {}
   }
 
@@ -61,10 +73,16 @@ export class FileLock {
 
   static release(lockFile = LOCK_FILE): void {
     try {
+      const owner = LOCK_OWNERS.get(lockFile)
+      if (!owner) return
       if (existsSync(lockFile)) {
-        unlinkSync(lockFile)
+        const currentOwner = readFileSync(lockFile, "utf-8").split("\n", 1)[0]
+        if (currentOwner === owner) {
+          unlinkSync(lockFile)
+        }
       }
     } catch {}
+    LOCK_OWNERS.delete(lockFile)
   }
 
   static async withLock<T>(

@@ -61,21 +61,6 @@ export class ScheduleManager {
     const result = await this.queueManager.triggerSchedule(scheduleId)
     if (!result) return
 
-    if (result.schedule.cronExpression && result.schedule.enabled) {
-      try {
-        const next = new CronJob(result.schedule.cronExpression, () => {}, undefined, true, result.schedule.timezone)
-        const nextDate = next.nextDate()
-        await this.queueManager.updateSchedule(scheduleId, {
-          nextTriggerAt: nextDate ? nextDate.toISO() : null,
-        })
-        next.stop()
-      } catch {
-        await this.queueManager.updateSchedule(scheduleId, { nextTriggerAt: null })
-      }
-    } else if (!result.schedule.enabled) {
-      await this.queueManager.updateSchedule(scheduleId, { nextTriggerAt: null })
-    }
-
     if (!result.schedule.enabled && this.jobs.has(scheduleId)) {
       this.jobs.get(scheduleId)!.stop()
       this.jobs.delete(scheduleId)

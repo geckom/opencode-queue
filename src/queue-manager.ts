@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto"
+import { CronJob } from "cron"
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs"
 import { resolve } from "path"
 import {
@@ -150,6 +151,18 @@ export class QueueManager {
     const tmp = QUEUE_FILE + ".tmp"
     writeFileSync(tmp, JSON.stringify(store, null, 2), "utf-8")
     renameSync(tmp, QUEUE_FILE)
+  }
+
+  private getNextCronTrigger(schedule: ScheduledTask): string | null {
+    if (!schedule.cronExpression) return null
+    try {
+      const job = new CronJob(schedule.cronExpression, () => {}, undefined, false, schedule.timezone)
+      const nextDate = job.nextDate()
+      job.stop()
+      return nextDate ? nextDate.toISO() : null
+    } catch {
+      return null
+    }
   }
 
   private wouldCreateDependencyCycle(itemId: string, parentItemId: string | null, items: QueueItem[]): boolean {
@@ -441,7 +454,16 @@ export class QueueManager {
       const schedule = store.schedules.find((candidate) => candidate.id === scheduleId)
       if (!schedule || !schedule.enabled) return null
 
-      schedule.lastTriggeredAt = new Date().toISOString()
+      const now = new Date()
+      const triggerAt = schedule.nextTriggerAt || schedule.scheduledFor
+      if (triggerAt) {
+        const triggerMs = new Date(triggerAt).getTime()
+        if (!Number.isNaN(triggerMs) && triggerMs > now.getTime()) {
+          return null
+        }
+      }
+
+      schedule.lastTriggeredAt = now.toISOString()
       schedule.occurrenceCount += 1
 
       if (schedule.maxOccurrences !== null && schedule.occurrenceCount >= schedule.maxOccurrences) {
@@ -450,6 +472,10 @@ export class QueueManager {
 
       if (schedule.scheduledFor) {
         schedule.enabled = false
+        schedule.nextTriggerAt = null
+      } else if (schedule.cronExpression && schedule.enabled) {
+        schedule.nextTriggerAt = this.getNextCronTrigger(schedule)
+      } else if (!schedule.enabled) {
         schedule.nextTriggerAt = null
       }
 

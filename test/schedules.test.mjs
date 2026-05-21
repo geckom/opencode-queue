@@ -70,6 +70,35 @@ test("recurring schedule generates items and updates occurrence count", async ()
   })
 })
 
+test("duplicate recurring triggers only enqueue one item for the same occurrence", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const { testingModule } = await loadBuiltModules(configHome)
+    const { QueueManager } = testingModule
+
+    const queueManager = new QueueManager()
+    const task = await queueManager.addSchedule({
+      workspace,
+      goal: "Single occurrence",
+      scheduledFor: null,
+      cronExpression: "* * * * * *",
+      timezone: "UTC",
+      enabled: true,
+      maxOccurrences: null,
+      parentItemId: null,
+      dependencyMode: "review_pending",
+    })
+    await queueManager.updateSchedule(task.id, { nextTriggerAt: new Date(Date.now() - 1000).toISOString() })
+
+    await Promise.all([queueManager.triggerSchedule(task.id), queueManager.triggerSchedule(task.id)])
+
+    const items = queueManager.listItems().filter((item) => item.sourceScheduleId === task.id)
+    const updatedSchedule = queueManager.getSchedule(task.id)
+    assert.equal(items.length, 1)
+    assert.equal(updatedSchedule.occurrenceCount, 1)
+    assert.ok(new Date(updatedSchedule.nextTriggerAt).getTime() > Date.now())
+  })
+})
+
 test("max-occurrence disable clears nextTriggerAt", async () => {
   await withTempRepo(async ({ configHome, workspace }) => {
     const { testingModule } = await loadBuiltModules(configHome)
