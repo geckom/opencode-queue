@@ -413,13 +413,23 @@ export class QueueManager {
   async resetRunningToPending(): Promise<void> {
     if (FileLock.isFresh(LOCK_FILE, PROCESSING_LOCK_STALE_MS)) return
 
-    await this.mutateStore((store) => {
-      for (const item of store.items) {
-        if (item.status === "running") {
-          item.status = "pending"
+    await FileLock.withLock(
+      STORE_LOCK_FILE,
+      STORE_LOCK_STALE_MS,
+      STORE_LOCK_RETRY_MS,
+      STORE_LOCK_WAIT_MS,
+      async () => {
+        const store = this.readStore()
+        let changed = false
+        for (const item of store.items) {
+          if (item.status === "running") {
+            item.status = "pending"
+            changed = true
+          }
         }
-      }
-    })
+        if (changed) this.writeStore(store)
+      },
+    )
   }
 
   listSchedules(): ScheduledTask[] {
@@ -475,6 +485,10 @@ export class QueueManager {
       if (triggerAt) {
         const triggerMs = new Date(triggerAt).getTime()
         if (!Number.isNaN(triggerMs) && triggerMs > now.getTime()) {
+          return null
+        }
+        const lastTriggeredMs = schedule.lastTriggeredAt ? new Date(schedule.lastTriggeredAt).getTime() : null
+        if (lastTriggeredMs !== null && !Number.isNaN(triggerMs) && lastTriggeredMs >= triggerMs) {
           return null
         }
       }

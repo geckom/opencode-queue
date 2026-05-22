@@ -16,10 +16,8 @@ export type DependencySourceStatus = "review_pending" | "completed" | null
 
 export interface QueueConfig {
   idleTimeoutSeconds: number
-  blockedReminderMinutes: number
   maxRetries: number
   retryDelaysMinutes: number[]
-  reminderIntervalMessages: number
   sessionTimeoutMinutes: number
 }
 

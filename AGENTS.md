@@ -13,7 +13,7 @@ This repo is the source of truth for the `opencode-queue` OpenCode plugin. Do no
 - `src/queue-processor.ts` — processing state machine and session lifecycle
 - `src/schedule-manager.ts` — CronJob lifecycle and schedule restoration
 - `src/shared-state.ts` — singleton coordinator/shared process state
-- `src/session-greeter.ts` — queue toasts and blocked reminders
+- `src/session-greeter.ts` — legacy no-op compatibility surface
 - `src/opencode-queue.ts` — runtime/package entry shim
 - `src/testing.ts` — local test-only surface
 - `test/*.test.mjs` — tests against compiled output
@@ -52,7 +52,7 @@ Registered tools:
 - Keep the deployed runtime bundle export shape minimal: default plugin export only.
 - `src/testing.ts` / `dist/testing.js` is for repo tests only, not the published package contract.
 - Timers must be `unref()`'d.
-- Toasts/reminders are best-effort only and must not block startup or processing.
+- Review-ready and blocked-state toasts are best-effort only and must not block startup or processing.
 - Never silently reset corrupted `queue.json`. Preserve it and fail safely.
 - All queue processing entry points, including follow-ups and blocked-session resumes, must respect `queue.lock`.
 - Tests depend on compiled `dist/`; do not run build and test in parallel.
@@ -75,7 +75,7 @@ review_pending -> pending -> running (follow-up)
 - Only one queued item should be running or resumed by the processor at a time across OpenCode instances.
 - Pending retry items must not be selected until `nextRetryAt`.
 - Corrupted `queue.json` is a hard error; the plugin preserves a backup and refuses further mutation until repaired.
-- Blocked reminders are time-based toasts controlled by `blockedReminderMinutes`.
+- Toasts are emitted only when processing moves an item to `review_pending` or `blocked`.
 
 ## Commands
 

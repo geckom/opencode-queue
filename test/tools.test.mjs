@@ -142,6 +142,43 @@ test("queue-followup continues a review item and marks descendants stale", async
   })
 })
 
+test("queue mutations do not auto-process while activity is recent", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const { testingModule } = await loadBuiltModules(configHome)
+    const queueManager = new testingModule.QueueManager()
+    const existing = await queueManager.addItem(workspace, "Existing pending task")
+    assert.ok("id" in existing)
+
+    let prompts = 0
+    const client = createMockClient()
+    client.session.promptAsync = async () => {
+      prompts += 1
+      return { data: undefined }
+    }
+
+    const { hooks, restoreTimers } = await createPluginHooks({
+      configHome,
+      workspace,
+      client,
+      stubTimers: true,
+    })
+
+    try {
+      const addResult = await hooks.tool["queue-add"].execute({ workspace, goal: "New pending task" })
+      assert.match(addResult, /Added /)
+      await sleep(800)
+
+      const items = queueManager.listItems()
+      assert.equal(prompts, 0)
+      assert.ok(items.some((item) => item.goal === "Existing pending task" && item.status === "pending"))
+      assert.ok(items.some((item) => item.goal === "New pending task" && item.status === "pending"))
+      assert.equal(items.some((item) => item.status === "running" || item.status === "review_pending"), false)
+    } finally {
+      restoreTimers?.()
+    }
+  })
+})
+
 test("processNext handles followupMessage items by reusing session", async () => {
   await withTempRepo(async ({ configHome, workspace }) => {
     const prompts = []
@@ -215,7 +252,7 @@ test("repeated plugin loads share a single coordinator timer and only one event 
       const firstHooks = await pluginModule.default(context)
       const secondHooks = await pluginModule.default(context)
 
-      assert.equal(timerStarts, 2)
+      assert.equal(timerStarts, 1)
       assert.equal(typeof firstHooks.event, "function")
       assert.equal(secondHooks.event, undefined)
       assert.equal(typeof firstHooks["tool.execute.before"], "function")
@@ -227,7 +264,7 @@ test("repeated plugin loads share a single coordinator timer and only one event 
   })
 })
 
-test("blocked reminder setting produces warning toasts for blocked items", async () => {
+test("non-review queue events do not create toasts", async () => {
   await withTempRepo(async ({ configHome, workspace }) => {
     const toasts = []
     const client = createMockClient()
@@ -246,7 +283,6 @@ test("blocked reminder setting produces warning toasts for blocked items", async
 
     try {
       const queueManager = new QueueManager()
-      await queueManager.updateConfig({ blockedReminderMinutes: 0 })
       const created = await queueManager.addItem(workspace, "Needs answer")
       assert.ok("id" in created)
       await queueManager.updateItem(created.id, {
@@ -263,11 +299,11 @@ test("blocked reminder setting produces warning toasts for blocked items", async
 
       const greeter = new SessionGreeter(() => queueManager.getConfig(), queueManager, client)
       await greeter.checkBlockedReminder()
+      await greeter.onSessionCreated()
+      await greeter.onMessageUpdated("s1")
       await sleep(1)
 
-      assert.ok(
-        toasts.some((toast) => typeof toast.message === "string" && toast.message.includes("Queue blocked: 1 item")),
-      )
+      assert.equal(toasts.length, 0)
       greeter.stop()
     } finally {
       restoreTimers?.()

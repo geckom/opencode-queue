@@ -1,6 +1,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import type { QueueItem } from "./types.js"
 import { QueueManager } from "./queue-manager.js"
+import { safeToast } from "./toast.js"
 
 export class BlockWatcher {
   private queueManager: QueueManager
@@ -42,6 +43,7 @@ export class BlockWatcher {
           userResponse: null,
         },
       })
+      this.showBlockedToast(item.id)
       return
     }
 
@@ -83,6 +85,7 @@ export class BlockWatcher {
           userResponse: null,
         },
       })
+      this.showBlockedToast(item.id)
     }
   }
 
@@ -113,6 +116,7 @@ export class BlockWatcher {
                 userResponse: null,
               },
             })
+            this.showBlockedToast(item.id)
             return true
           }
         }
@@ -129,6 +133,16 @@ export class BlockWatcher {
     } catch {}
 
     return false
+  }
+
+  private showBlockedToast(itemId: string): void {
+    const item = this.queueManager.getItem(itemId)
+    if (!item?.blockedReason) return
+    safeToast(
+      this.client,
+      `Queue item blocked: ${item.blockedReason.details.substring(0, 120)}`,
+      "warning",
+    )
   }
 
   async respondToBlock(item: QueueItem, response: string): Promise<boolean> {

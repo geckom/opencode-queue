@@ -4,7 +4,7 @@
  */
 
 export { BlockWatcher } from "./block-watcher.js"
-export { QUEUE_CORRUPTION_MARKER_FILE, QUEUE_FILE } from "./constants.js"
+export { LAST_ACTIVITY_FILE, QUEUE_CORRUPTION_MARKER_FILE, QUEUE_FILE } from "./constants.js"
 export { FileLock } from "./file-lock.js"
 export { IdleDetector } from "./idle-detector.js"
 export { QueueProcessor } from "./queue-processor.js"

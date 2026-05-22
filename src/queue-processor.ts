@@ -1,10 +1,11 @@
 import type { OpencodeClient } from "@opencode-ai/sdk"
-import { existsSync, readFileSync } from "fs"
-import { LAST_ACTIVITY_FILE, LOCK_FILE, PROCESSING_LOCK_REFRESH_MS, PROCESSING_LOCK_STALE_MS } from "./constants.js"
+import { existsSync } from "fs"
+import { LOCK_FILE, PROCESSING_LOCK_REFRESH_MS, PROCESSING_LOCK_STALE_MS } from "./constants.js"
 import { BlockWatcher } from "./block-watcher.js"
 import { FileLock } from "./file-lock.js"
 import { IdleDetector } from "./idle-detector.js"
 import { QueueManager } from "./queue-manager.js"
+import { safeToast } from "./toast.js"
 import { sleep } from "./utils.js"
 
 type ProcessResult = {
@@ -215,6 +216,7 @@ export class QueueProcessor {
         nextRetryAt: null,
         error: null,
       })
+      this.showReviewToast(itemId)
     } catch {
       await this.queueManager.updateItem(itemId, {
         status: "review_pending",
@@ -225,7 +227,14 @@ export class QueueProcessor {
         nextRetryAt: null,
         error: null,
       })
+      this.showReviewToast(itemId)
     }
+  }
+
+  private showReviewToast(itemId: string): void {
+    const item = this.queueManager.getItem(itemId)
+    if (!item) return
+    safeToast(this.client, `Queue item ready for review: ${item.goal.substring(0, 120)}`, "success")
   }
 
   private async handleSessionError(itemId: string, err: unknown): Promise<void> {
@@ -258,6 +267,8 @@ export class QueueProcessor {
     if (!(await FileLock.acquire(LOCK_FILE, PROCESSING_LOCK_STALE_MS))) return
     const heartbeat = FileLock.startHeartbeat(LOCK_FILE, PROCESSING_LOCK_REFRESH_MS)
     try {
+      if (!this.idleDetector.isIdle()) return
+
       let hasMore = true
       while (hasMore) {
         const result = await this.processNextLocked()
@@ -266,15 +277,7 @@ export class QueueProcessor {
           continue
         }
 
-        const lastActivity = (() => {
-          try {
-            return Number.parseInt(readFileSync(LAST_ACTIVITY_FILE, "utf-8").trim(), 10)
-          } catch {
-            return 0
-          }
-        })()
-        const stillIdle = Date.now() - lastActivity >= this.queueManager.getConfig().idleTimeoutSeconds * 1000
-        if (!stillIdle) hasMore = false
+        if (!this.idleDetector.isIdle()) hasMore = false
       }
     } finally {
       FileLock.stopHeartbeat(heartbeat)

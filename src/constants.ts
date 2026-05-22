@@ -22,9 +22,7 @@ export const SIGNAL_EXIT_CODE: Record<"SIGINT" | "SIGTERM", number> = {
 
 export const DEFAULT_CONFIG: QueueConfig = {
   idleTimeoutSeconds: 3600,
-  blockedReminderMinutes: 30,
   maxRetries: 3,
   retryDelaysMinutes: [5, 10, 15],
-  reminderIntervalMessages: 30,
   sessionTimeoutMinutes: 60,
 }

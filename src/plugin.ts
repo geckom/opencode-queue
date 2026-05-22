@@ -7,7 +7,6 @@ import { formatQueueItemFull, formatQueueItemLog, formatQueueItemSummary, format
 import { QueueProcessor } from "./queue-processor.js"
 import { QueueManager } from "./queue-manager.js"
 import { getSharedState } from "./shared-state.js"
-import { safeToast } from "./toast.js"
 import type { QueueItem } from "./types.js"
 
 function findQueueItem(queueManager: QueueManager, itemId: string): QueueItem | undefined {
@@ -27,7 +26,7 @@ export const OpencodeQueuePlugin: Plugin = async (ctx) => {
   const shared = getSharedState(client, ctx.serverUrl)
   await shared.initialized
   shared.cleanedUp = false
-  const { queueManager, idleDetector, sessionGreeter: greeter } = shared
+  const { queueManager, idleDetector } = shared
   const isCoordinator = !shared.coordinatorClaimed
   if (isCoordinator) {
     shared.coordinatorClaimed = true
@@ -36,13 +35,8 @@ export const OpencodeQueuePlugin: Plugin = async (ctx) => {
     registerProcessCleanup(shared)
     idleDetector.start()
     shared.scheduleManager.start()
-    greeter.startBlockedReminders()
   }
   const blockWatcher = new BlockWatcher(queueManager, client)
-
-  if (isCoordinator) {
-    safeToast(client, "opencode-queue loaded", "info", 3000)
-  }
 
   const hooks: Awaited<ReturnType<Plugin>> = {
     "chat.message": async () => {
@@ -320,7 +314,6 @@ export const OpencodeQueuePlugin: Plugin = async (ctx) => {
         await blockWatcher.handleEvent(event)
         switch (event.type) {
           case "session.created":
-            await greeter.onSessionCreated()
             break
           case "session.updated":
           case "command.executed":
@@ -349,7 +342,6 @@ export const OpencodeQueuePlugin: Plugin = async (ctx) => {
             idleDetector.writeActivity()
             const info = event.properties?.info as { sessionID?: string; role?: string } | undefined
             if (info?.sessionID) {
-              await greeter.onMessageUpdated(info.sessionID)
               if (info.role === "user") {
                 const item = findItemBySession(queueManager, info.sessionID)
                 if (item?.status === "blocked" && item.blockedReason?.type === "question") {

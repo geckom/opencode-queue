@@ -38,15 +38,20 @@ export class IdleDetector {
     } catch {}
   }
 
+  isIdle(): boolean {
+    try {
+      if (!existsSync(LAST_ACTIVITY_FILE)) return true
+      const lastActivity = Number.parseInt(readFileSync(LAST_ACTIVITY_FILE, "utf-8").trim(), 10)
+      if (Number.isNaN(lastActivity)) return false
+      return Date.now() - lastActivity >= this.getConfig().idleTimeoutSeconds * 1000
+    } catch {
+      return false
+    }
+  }
+
   async checkIdle(): Promise<void> {
     try {
-      if (!existsSync(LAST_ACTIVITY_FILE)) {
-        await this.onIdle()
-        return
-      }
-      const lastActivity = Number.parseInt(readFileSync(LAST_ACTIVITY_FILE, "utf-8").trim(), 10)
-      const elapsed = Date.now() - lastActivity
-      if (elapsed >= this.getConfig().idleTimeoutSeconds * 1000) {
+      if (this.isIdle()) {
         await this.onIdle()
       }
     } catch {}

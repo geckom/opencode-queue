@@ -20,7 +20,12 @@ test("processor moves a finished pending item into review and stores the result"
     const created = await queueManager.addItem(workspace, "Run the queued task")
     assert.ok("id" in created)
 
+    const toasts = []
     const client = createMockClient()
+    client.tui.showToast = async ({ body }) => {
+      toasts.push(body)
+      return { data: true }
+    }
     const idleDetector = new IdleDetector(() => queueManager.getConfig(), async () => {})
     const processor = new QueueProcessor(queueManager, client, idleDetector, new URL("http://127.0.0.1:4096"))
 
@@ -32,6 +37,9 @@ test("processor moves a finished pending item into review and stores the result"
     assert.match(item.result, /Task finished successfully/)
     assert.equal(item.sessionId, "s1")
     assert.equal(item.completedAt, null)
+    assert.equal(toasts.length, 1)
+    assert.equal(toasts[0].variant, "success")
+    assert.match(toasts[0].message, /ready for review/i)
   })
 })
 
@@ -84,7 +92,14 @@ test("permission events move running items into blocked state", async () => {
     assert.ok("id" in created)
     await queueManager.updateItem(created.id, { status: "running", sessionId: "s1" })
 
-    const watcher = new BlockWatcher(queueManager, createMockClient())
+    const toasts = []
+    const client = createMockClient()
+    client.tui.showToast = async ({ body }) => {
+      toasts.push(body)
+      return { data: true }
+    }
+
+    const watcher = new BlockWatcher(queueManager, client)
     await watcher.handleEvent({
       type: "permission.asked",
       properties: { id: "perm-1", sessionID: "s1", permission: "edit files", patterns: ["src/**"] },
@@ -93,6 +108,9 @@ test("permission events move running items into blocked state", async () => {
     let item = queueManager.getItem(created.id)
     assert.equal(item?.status, "blocked")
     assert.equal(item?.blockedReason?.type, "permission")
+    assert.equal(toasts.length, 1)
+    assert.equal(toasts[0].variant, "warning")
+    assert.match(toasts[0].message, /blocked/i)
   })
 })
 
@@ -106,7 +124,14 @@ test("question events move running items into blocked state", async () => {
     assert.ok("id" in created)
     await queueManager.updateItem(created.id, { status: "running", sessionId: "s1" })
 
-    const watcher = new BlockWatcher(queueManager, createMockClient())
+    const toasts = []
+    const client = createMockClient()
+    client.tui.showToast = async ({ body }) => {
+      toasts.push(body)
+      return { data: true }
+    }
+
+    const watcher = new BlockWatcher(queueManager, client)
     await watcher.handleEvent({
       type: "question.asked",
       properties: {
@@ -120,6 +145,9 @@ test("question events move running items into blocked state", async () => {
     assert.equal(item?.status, "blocked")
     assert.equal(item?.blockedReason?.type, "question")
     assert.deepEqual(item?.blockedReason?.options, ["React", "Vue"])
+    assert.equal(toasts.length, 1)
+    assert.equal(toasts[0].variant, "warning")
+    assert.match(toasts[0].message, /blocked/i)
   })
 })
 
@@ -262,6 +290,36 @@ test("processQueue stops after a task becomes blocked", async () => {
 
     assert.equal(queueManager.getItem(firstItem.id).status, "blocked")
     assert.equal(queueManager.getItem(secondItem.id).status, "pending")
+  })
+})
+
+test("processQueue does not start work before idle timeout", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const { testingModule } = await loadBuiltModules(configHome)
+    const { QueueManager, QueueProcessor, IdleDetector, LAST_ACTIVITY_FILE, QUEUE_FILE } = testingModule
+    try {
+      unlinkSync(QUEUE_FILE)
+    } catch {}
+
+    const queueManager = new QueueManager()
+    await queueManager.updateConfig({ idleTimeoutSeconds: 3600 })
+    const created = await queueManager.addItem(workspace, "Must wait for idle")
+    assert.ok("id" in created)
+    writeFileSync(LAST_ACTIVITY_FILE, Date.now().toString(), "utf8")
+
+    let prompts = 0
+    const client = createMockClient()
+    client.session.promptAsync = async () => {
+      prompts += 1
+      return { data: undefined }
+    }
+
+    const idleDetector = new IdleDetector(() => queueManager.getConfig(), async () => {})
+    const processor = new QueueProcessor(queueManager, client, idleDetector, new URL("http://127.0.0.1:4096"))
+    await processor.processQueue()
+
+    assert.equal(prompts, 0)
+    assert.equal(queueManager.getItem(created.id).status, "pending")
   })
 })
 
