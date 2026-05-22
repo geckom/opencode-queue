@@ -76,6 +76,7 @@ review_pending -> pending -> running (follow-up)
 - Pending retry items must not be selected until `nextRetryAt`.
 - Corrupted `queue.json` is a hard error; the plugin preserves a backup and refuses further mutation until repaired.
 - Toasts are emitted only when processing moves an item to `review_pending` or `blocked`.
+- Idle activity is refreshed on chat messages, command start, and tool start/finish hooks.
 
 ## Commands
 

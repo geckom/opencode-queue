@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createPluginHooks, createMockClient, loadBuiltModules, sleep, withTempRepo } from "./helpers.mjs"
 
@@ -173,6 +173,28 @@ test("queue mutations do not auto-process while activity is recent", async () =>
       assert.ok(items.some((item) => item.goal === "Existing pending task" && item.status === "pending"))
       assert.ok(items.some((item) => item.goal === "New pending task" && item.status === "pending"))
       assert.equal(items.some((item) => item.status === "running" || item.status === "review_pending"), false)
+    } finally {
+      restoreTimers?.()
+    }
+  })
+})
+
+test("command start hook records activity before long-running commands", async () => {
+  await withTempRepo(async ({ configHome, workspace }) => {
+    const { hooks, testingModule, restoreTimers } = await createPluginHooks({ configHome, workspace, stubTimers: true })
+    const { LAST_ACTIVITY_FILE } = testingModule
+    try {
+      writeFileSync(LAST_ACTIVITY_FILE, "1", "utf8")
+
+      await hooks["command.execute.before"]({
+        command: "test",
+        sessionID: "s1",
+        arguments: "",
+      }, { parts: [] })
+
+      const lastActivity = Number.parseInt(readFileSync(LAST_ACTIVITY_FILE, "utf8").trim(), 10)
+      assert.ok(lastActivity > 1)
+      assert.ok(Date.now() - lastActivity < 5_000)
     } finally {
       restoreTimers?.()
     }

@@ -82,7 +82,7 @@ test("processor treats a missing session.status entry as review-ready after assi
   })
 })
 
-test("permission events move running items into blocked state", async () => {
+test("permission.updated events move running items into blocked state", async () => {
   await withTempRepo(async ({ configHome, workspace }) => {
     const { testingModule } = await loadBuiltModules(configHome)
     const { QueueManager, BlockWatcher } = testingModule
@@ -101,13 +101,25 @@ test("permission events move running items into blocked state", async () => {
 
     const watcher = new BlockWatcher(queueManager, client)
     await watcher.handleEvent({
-      type: "permission.asked",
-      properties: { id: "perm-1", sessionID: "s1", permission: "edit files", patterns: ["src/**"] },
+      type: "permission.updated",
+      properties: {
+        id: "perm-1",
+        type: "edit",
+        title: "Edit files",
+        pattern: ["src/**"],
+        sessionID: "s1",
+        messageID: "m1",
+        metadata: {},
+        time: { created: Date.now() },
+      },
     })
 
     let item = queueManager.getItem(created.id)
     assert.equal(item?.status, "blocked")
     assert.equal(item?.blockedReason?.type, "permission")
+    assert.equal(item?.blockedReason?.permissionId, "perm-1")
+    assert.match(item?.blockedReason?.details, /Edit files/)
+    assert.match(item?.blockedReason?.details, /src\/\*\*/)
     assert.equal(toasts.length, 1)
     assert.equal(toasts[0].variant, "warning")
     assert.match(toasts[0].message, /blocked/i)

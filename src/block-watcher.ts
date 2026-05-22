@@ -1,5 +1,5 @@
 import type { OpencodeClient } from "@opencode-ai/sdk"
-import type { QueueItem } from "./types.js"
+import type { BlockedReason, QueueItem } from "./types.js"
 import { QueueManager } from "./queue-manager.js"
 import { safeToast } from "./toast.js"
 
@@ -13,11 +13,14 @@ export class BlockWatcher {
   }
 
   async handleEvent(event: { type: string; properties?: Record<string, unknown> }): Promise<void> {
-    if (event.type === "permission.asked") {
+    if (event.type === "permission.updated" || event.type === "permission.asked") {
       const permission = event.properties as
         | {
             id?: string
             sessionID?: string
+            type?: string
+            title?: string
+            pattern?: string | string[]
             permission?: string
             patterns?: string[]
           }
@@ -27,23 +30,28 @@ export class BlockWatcher {
       const item = this.queueManager.listItems("running").find((candidate) => candidate.sessionId === permission.sessionID)
       if (!item) return
 
-      const patterns = Array.isArray(permission.patterns) ? permission.patterns : []
-      const details = [permission.permission, patterns.length > 0 ? `Patterns: ${patterns.join(", ")}` : null]
+      const patternValues = Array.isArray(permission.pattern)
+        ? permission.pattern
+        : typeof permission.pattern === "string"
+          ? [permission.pattern]
+          : Array.isArray(permission.patterns)
+            ? permission.patterns
+            : []
+      const details = [
+        permission.title || permission.permission || permission.type,
+        patternValues.length > 0 ? `Patterns: ${patternValues.join(", ")}` : null,
+      ]
         .filter(Boolean)
         .join(" | ")
 
-      await this.queueManager.updateItem(item.id, {
-        status: "blocked",
-        blockedReason: {
-          type: "permission",
-          permissionId: typeof permission.id === "string" ? permission.id : null,
-          requestId: typeof permission.id === "string" ? permission.id : null,
-          details: details || "Permission request pending",
-          options: ["once", "always", "reject"],
-          userResponse: null,
-        },
+      await this.blockItem(item.id, {
+        type: "permission",
+        permissionId: typeof permission.id === "string" ? permission.id : null,
+        requestId: typeof permission.id === "string" ? permission.id : null,
+        details: details || "Permission request pending",
+        options: ["once", "always", "reject"],
+        userResponse: null,
       })
-      this.showBlockedToast(item.id)
       return
     }
 
@@ -74,18 +82,14 @@ export class BlockWatcher {
           : [],
       )
 
-      await this.queueManager.updateItem(item.id, {
-        status: "blocked",
-        blockedReason: {
-          type: "question",
-          permissionId: null,
-          requestId: typeof question.id === "string" ? question.id : null,
-          details: details || "Question pending",
-          options: options.length > 0 ? options : null,
-          userResponse: null,
-        },
+      await this.blockItem(item.id, {
+        type: "question",
+        permissionId: null,
+        requestId: typeof question.id === "string" ? question.id : null,
+        details: details || "Question pending",
+        options: options.length > 0 ? options : null,
+        userResponse: null,
       })
-      this.showBlockedToast(item.id)
     }
   }
 
@@ -105,18 +109,14 @@ export class BlockWatcher {
         for (const part of msg.parts) {
           if (part.type === "tool" && part.tool === "question" && part.state.status === "pending") {
             const input = part.state.input as Record<string, unknown>
-            await this.queueManager.updateItem(item.id, {
-              status: "blocked",
-              blockedReason: {
-                type: "question",
-                permissionId: null,
-                requestId: null,
-                details: String(input.text || input.message || input.question || JSON.stringify(input)),
-                options: Array.isArray(input.options) ? input.options.map(String) : null,
-                userResponse: null,
-              },
+            await this.blockItem(item.id, {
+              type: "question",
+              permissionId: null,
+              requestId: null,
+              details: String(input.text || input.message || input.question || JSON.stringify(input)),
+              options: Array.isArray(input.options) ? input.options.map(String) : null,
+              userResponse: null,
             })
-            this.showBlockedToast(item.id)
             return true
           }
         }
@@ -133,6 +133,14 @@ export class BlockWatcher {
     } catch {}
 
     return false
+  }
+
+  private async blockItem(itemId: string, blockedReason: BlockedReason): Promise<void> {
+    await this.queueManager.updateItem(itemId, {
+      status: "blocked",
+      blockedReason,
+    })
+    this.showBlockedToast(itemId)
   }
 
   private showBlockedToast(itemId: string): void {

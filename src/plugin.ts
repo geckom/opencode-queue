@@ -42,6 +42,9 @@ export const OpencodeQueuePlugin: Plugin = async (ctx) => {
     "chat.message": async () => {
       idleDetector.writeActivity()
     },
+    "command.execute.before": async () => {
+      idleDetector.writeActivity()
+    },
     "tool.execute.before": async () => {
       idleDetector.writeActivity()
     },
