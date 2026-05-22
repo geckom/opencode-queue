@@ -140,6 +140,7 @@ export class QueueProcessor {
       const maxWaitMs = this.queueManager.getConfig().sessionTimeoutMinutes * 60 * 1000
       const pollIntervalMs = 5_000
       const startTime = Date.now()
+      let idleCount = 0
 
       while (Date.now() - startTime < maxWaitMs) {
         const item = this.queueManager.getItem(itemId)
@@ -152,20 +153,21 @@ export class QueueProcessor {
         if (statusMap && statusMap[sessionId]) {
           const status = statusMap[sessionId]
           if (status.type === "idle") {
-            await this.captureResult(itemId, sessionId, q)
-            return
+            idleCount++
+            if (idleCount >= 2) {
+              await this.captureResult(itemId, sessionId, q)
+              return
+            }
+          } else {
+            idleCount = 0
           }
           if (status.type === "retry" && status.next) {
             await new Promise((resolve) => setTimeout(resolve, Math.min(status.next - Date.now(), pollIntervalMs)))
             continue
           }
-        } else if (statusMap && !statusMap[sessionId]) {
-          const { data: messages } = await this.client.session.messages({
-            path: { id: sessionId },
-            query: q,
-          })
-          const hasAssistantMessage = Boolean(messages?.some((message) => message.info.role === "assistant"))
-          if (hasAssistantMessage) {
+        } else {
+          idleCount++
+          if (idleCount >= 2) {
             await this.captureResult(itemId, sessionId, q)
             return
           }

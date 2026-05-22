@@ -128,14 +128,13 @@ test("queue-followup continues a review item and marks descendants stale", async
         message: "Please revise the parent output.",
       })
 
-      assert.equal(followupResult, `Follow-up sent for ${parent.id}.`)
-      assert.equal(prompts.length, 1)
-      assert.equal(prompts[0].body.parts[0].text, "Please revise the parent output.")
+      assert.equal(followupResult, `Follow-up queued for ${parent.id}.`)
+      assert.equal(prompts.length, 0)
 
       const updatedParent = queueManager.getItem(parent.id)
       const updatedChild = queueManager.getItem(child.id)
-      assert.equal(updatedParent?.status, "review_pending")
-      assert.match(updatedParent?.result || "", /Task finished successfully/)
+      assert.equal(updatedParent?.status, "pending")
+      assert.equal(updatedParent?.followupMessage, "Please revise the parent output.")
       assert.equal(updatedChild?.staleDependency, true)
     } finally {
       restoreTimers?.()
